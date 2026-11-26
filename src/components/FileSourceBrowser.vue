@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch, onUnmounted } from 'vue'
-import { Folder, File, ArrowLeft, Star, Download } from 'lucide-vue-next'
+import { computed, ref, watch, onUnmounted } from 'vue-react3'
+import { Folder, File, ArrowLeft, Star, Download } from 'lucide-vue-react3'
 import type { IAliGetFileModel } from '../aliapi/alimodels'
 import AliDirFileList from '../aliapi/dirfilelist'
 import { listProviderFolderItems } from '../utils/providerFolderList'
