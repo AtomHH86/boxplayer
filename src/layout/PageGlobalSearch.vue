@@ -12,6 +12,7 @@ import PanHubMediaResults, { type TmdbMediaResult } from './PanHubMediaResults.v
 import PanHubSearchBox from './PanHubSearchBox.vue'
 import { checkAndIncrement } from '../utils/usageLimit'
 import message from '../utils/message'
+import { resolveQuarkSearchDirectory } from '../utils/quarkSearchNavigation'
 import Config from '../config'
 import DownDAL from '../down/DownDAL'
 import TorrentFileSelector from '../down/TorrentFileSelector.vue'
@@ -331,6 +332,8 @@ function onSearchBoxSubmit() {
   doSearch()
 }
 
+let searchController: AbortController | undefined
+
 function doSearch() {
   if (searchMode.value === 'panhub') { phDoSearch(); return }
   const q = keyword.value.trim()
@@ -344,22 +347,34 @@ function doSearch() {
   addToHistory(q)
   const id = ++searchId.value
   searching.value = true
-  searchAllDrives(q).then((items) => {
+  searchController?.abort()
+  searchController = new AbortController()
+  cloudResults.value = []
+  msResults.value = []
+  const publish = (items: GlobalSearchResult[]) => {
     if (id !== searchId.value) return
+    const selected = allItems.value[selectedIndex.value]?.result
     cloudResults.value = items.filter((r) => r.source === 'cloud')
     msResults.value = items.filter((r) => r.source === 'media_server')
-    if (items.length > 0) {
+    const retained = selected ? allItems.value.findIndex(({ result: item }) => item.id === selected.id && item.user_id === selected.user_id && item.mediaServerId === selected.mediaServerId) : -1
+    if (retained >= 0) selectedIndex.value = retained
+    else if (items.length) {
       selectedSection.value = items[0].source === 'cloud' ? 'cloud' : 'ms'
       selectedIndex.value = 0
     } else {
       selectedSection.value = null
       selectedIndex.value = -1
     }
-    searching.value = false
+  }
+  searchAllDrives(q, { signal: searchController.signal, onUpdate: publish }).then(publish).catch(() => {}).finally(() => {
+    if (id === searchId.value) searching.value = false
   })
 }
 
 watch(keyword, () => {
+  searchId.value++
+  searchController?.abort()
+  cloudResults.value = []; msResults.value = []
   if (searchTimer.value) clearTimeout(searchTimer.value)
   selectedSection.value = null; selectedIndex.value = 0
   if (keyword.value.trim().length < 2) { cloudResults.value = []; msResults.value = []; phMerged.value = {}; phTmdbItems.value = []; phTmdbError.value = ''; phTmdbLoading.value = false; searching.value = false; return }
@@ -368,6 +383,7 @@ watch(keyword, () => {
 })
 
 watch(searchMode, () => {
+  searchController?.abort()
   if (searchTimer.value) clearTimeout(searchTimer.value)
   if (searchMode.value === 'local') {
     phController?.abort(); phController = null; phLoading.value = false
@@ -395,7 +411,7 @@ async function handleClick(result: GlobalSearchResult) {
   }
 
   nextTick(async () => {
-    appStore.toggleTab('pan')
+    appStore.toggleTabMenu('pan', 'wangpan')
     await nextTick()
 
     const { default: usePanTreeStore } = await import('../pan/pantreestore')
@@ -404,12 +420,27 @@ async function handleClick(result: GlobalSearchResult) {
     const panTreeStore = usePanTreeStore()
 
     if (panTreeStore.user_id !== result.user_id) {
-      await UserDAL.UserChange(result.user_id)
+      if (!await UserDAL.UserChange(result.user_id)) return
     }
 
     await nextTick()
 
+    appStore.toggleTabMenu('pan', 'wangpan')
     let fileId = result.parent_file_id || result.file_id
+    if (result.provider === 'quark') {
+      try {
+        fileId = await resolveQuarkSearchDirectory({
+          fileId: result.file_id, parentFileId: result.parent_file_id, isDir: result.isDir
+        }, async () => {
+          const { apiQuarkFileDetail } = await import('../quark/dirfilelist')
+          const detail = await apiQuarkFileDetail(result.user_id, result.file_id)
+          return detail?.pdir_fid == null ? undefined : String(detail.pdir_fid)
+        })
+      } catch {
+        message.error(t('pan.unrecognizedCurrentDir'))
+        return
+      }
+    }
     if (fileId === '/' || !fileId) {
       if (result.provider === 'baidu') fileId = 'baidu_root'
       else if (result.provider === 'cloud123') fileId = 'cloud_root'
@@ -421,7 +452,9 @@ async function handleClick(result: GlobalSearchResult) {
       else if (result.provider === 'box') fileId = 'box_root'
     }
 
-    PanDAL.aReLoadOneDirToShow(result.drive_id, fileId, true)
+    if (!await PanDAL.aReLoadOneDirToShow(result.drive_id, fileId, true)) {
+      message.error(t('pan.unrecognizedCurrentDir'))
+    }
   })
 }
 
@@ -532,6 +565,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  searchId.value++
+  searchController?.abort()
   if (acquisitionStateTimer) clearInterval(acquisitionStateTimer)
   if (searchTimer.value) clearTimeout(searchTimer.value)
   phController?.abort()
@@ -606,7 +641,7 @@ onUnmounted(() => {
         {{ t('search.noResults', { keyword }) }}
       </div>
 
-      <div v-if="!searching" class="gs-page-results" :class="{ 'gs-split-mode': hasBoth }">
+      <div v-if="totalCloud > 0 || totalMs > 0" class="gs-page-results" :class="{ 'gs-split-mode': hasBoth }">
 
         <!-- Split layout: both cloud + media server -->
         <div v-if="hasBoth" class="gs-split">

@@ -2,13 +2,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../boxplayerAuth', () => ({ getBoxPlayerAccessToken: vi.fn(async () => 'test-token') }))
 
+
+import Config from '../../config'
 import { getBoxPlayerMediaScrapeUrl, mapBoxPlayerCloudAIError, scrapeMediaWithBoxPlayerCloud } from '../boxplayerCloudAI'
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('BoxPlayer Cloud AI error mapping', () => {
+  it('defaults resource and AI requests to the unified Worker', () => {
+    expect(Config.BOXPLAYER_API_URL).toBe('https://api.boxplayer.cc')
+    expect(Config.BOXPLAYER_AI_API_URL).toBe('https://api.boxplayer.cc')
+  })
+
   it('routes media scraping through the BoxPlayer resource API', () => {
-    expect(getBoxPlayerMediaScrapeUrl()).toBe('https://boxplayer-api-673444103572.europe-west1.run.app/v2/media-scrape')
+    expect(getBoxPlayerMediaScrapeUrl()).toBe('https://api.boxplayer.cc/v2/media-scrape')
   })
 
   it('passes the caller abort signal through to the media scrape request', async () => {

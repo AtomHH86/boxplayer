@@ -1,5 +1,6 @@
 <script setup lang='ts'>
 import { computed, h, ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ChevronDown, ChevronUp } from 'lucide-vue-next'
 import SourceFormSurface from '../components/SourceFormSurface.vue'
 import { ITokenInfo, useAppStore, useSettingStore, useUserStore } from '../store'
 import UserDAL from '../user/userdal'
@@ -15,7 +16,7 @@ import { QRCode as AntQRCode } from 'ant-design-vue'
 import { buildCloud123AuthUrl, exchangeCloud123CodeForToken } from '../cloud123/auth'
 import { buildBaiduAuthUrl, exchangeBaiduCodeForToken } from '../cloudbaidu/auth'
 import { refreshDrive115UserInfo } from '../cloud115/auth'
-import { buildQrImageUrl, DRIVE115_APP_ID, exchangeDeviceCode, generatePkce, normalize115Token, pollDeviceStatus, requestDeviceCode } from '../utils/drive115'
+import { DRIVE115_APP_ID, exchangeDeviceCode, generatePkce, normalize115Token, pollDeviceStatus, requestDeviceCode } from '../utils/drive115'
 import { loginPikPak } from '../pikpak/auth'
 import { completeQuarkQrLogin, pollQuarkQrStatus, requestQuarkQrCode } from '../quark/auth'
 import { normalizeCloud139Token } from '../cloud139/auth'
@@ -120,9 +121,11 @@ const googleState = ref('')
 const googleRedirectUri = ref('')
 const googleLoading = ref(false)
 const remoteDriveLoading = ref(false)
-const remoteDriveForm = ref({ name: props.sourceName || '', url: '', username: '', password: '', rootPath: '/' })
+const remoteAdvanced = ref(false)
+const remoteDriveForm = ref({ name: '', url: '', username: '', password: '', rootPath: '' })
 const drive115ClientId = ref(DRIVE115_APP_ID || '')
 const drive115Verifier = ref('')
+const drive115QrContent = ref('')
 const drive115Uid = ref('')
 const drive115Time = ref('')
 const drive115Sign = ref('')
@@ -130,6 +133,8 @@ const drive115Tips = ref(t('login.scanWith115'))
 const drive115Loading = ref(false)
 const drive115Polling = ref(false)
 let drive115Timer: any = null
+let drive115Session = 0
+let drive115PollFailures = 0
 let quarkTimer: any = null
 let quarkPolling = false
 let cloud189Timer: any = null
@@ -242,12 +247,21 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  drive115Session++
+  drive115Polling.value = false
+  if (drive115Timer) clearTimeout(drive115Timer)
   disposed = true
   if (props.embedded) { handleClose(); useUser.loginFromFileSources = false }
   window.removeEventListener('cloud123-oauth-callback', handleOauthCallback as EventListener)
 })
 
-watch(loginProvider, () => {
+watch(loginProvider, (_provider, previousProvider) => {
+  if (previousProvider === '115') {
+    drive115Session++
+    drive115Polling.value = false
+    if (drive115Timer) clearTimeout(drive115Timer)
+    drive115Timer = null
+  }
   if (props.embedded || !loginVisible.value) return
   clearOpenTimers()
   if (loginProvider.value === 'cloud123') {
@@ -429,6 +443,7 @@ const handleClose = () => {
   client_secret.value = ALIYUN_APP_SECRET
   clearInterval(intervalId.value)
   clearOpenTimers()
+  drive115Session++
   if (drive115Timer) {
     clearTimeout(drive115Timer)
     drive115Timer = null
@@ -443,6 +458,7 @@ const handleClose = () => {
   baiduLoading.value = false
   baiduAuthUrl.value = ''
   drive115Verifier.value = ''
+  drive115QrContent.value = ''
   drive115Uid.value = ''
   drive115Time.value = ''
   drive115Sign.value = ''
@@ -476,7 +492,7 @@ const handleClose = () => {
   boxLoading.value = false
   boxAuthUrl.value = ''
   remoteDriveLoading.value = false
-  remoteDriveForm.value = { name: '', url: '', username: '', password: '', rootPath: '/' }
+  remoteDriveForm.value = { name: '', url: '', username: '', password: '', rootPath: '' }; remoteAdvanced.value = false
 }
 
 const submitRemoteDrive = async () => {
@@ -487,6 +503,7 @@ const submitRemoteDrive = async () => {
     return
   }
 
+  if (!form.name.trim()) form.name = t('mediaServer.defaultName', { type: provider === 'alist' ? 'AList' : 'WebDAV' })
   remoteDriveLoading.value = true
   try {
     const connection = provider === 'alist' ? createAListConnection(form) : createWebDavConnection(form)
@@ -989,18 +1006,30 @@ const pollQuarkStatus = async () => {
 }
 
 const handleOpen115 = async () => {
+  const session = ++drive115Session
+  drive115Polling.value = false
+  drive115PollFailures = 0
+  if (drive115Timer) clearTimeout(drive115Timer)
+  drive115Timer = null
+  drive115QrContent.value = ''
   if (!drive115ClientId.value.trim() && !DRIVE115_APP_ID) {
     loginLoading.value = false
+    qrCodeStatusType.value = 'error'
     drive115Tips.value = t('login.clientId')
     return
   }
   loginLoading.value = true
   drive115Loading.value = true
+  qrCodeStatusType.value = 'info'
+  drive115Tips.value = t('login.gettingQr')
   try {
     const { codeVerifier, codeChallenge } = await generatePkce()
+    if (session !== drive115Session) return
     drive115Verifier.value = codeVerifier
     const resp = await requestDeviceCode(drive115ClientId.value.trim(), codeChallenge, 'sha256')
+    if (session !== drive115Session) return
     if (resp.error) {
+      qrCodeStatusType.value = 'error'
       drive115Tips.value = resp.error
       loginLoading.value = false
       drive115Loading.value = false
@@ -1009,27 +1038,35 @@ const handleOpen115 = async () => {
     drive115Uid.value = resp.uid || ''
     drive115Time.value = resp.time || ''
     drive115Sign.value = resp.sign || ''
-    qrCodeUrl.value = buildQrImageUrl(resp.qrcode || '')
+    drive115QrContent.value = resp.qrcode || ''
     qrCodeStatusType.value = 'info'
     drive115Tips.value = t('login.scanWith115')
     loginLoading.value = false
     drive115Loading.value = false
     drive115Polling.value = true
-    poll115Status()
+    poll115Status(session)
   } catch (err: any) {
+    if (session !== drive115Session) return
+    qrCodeStatusType.value = 'error'
     drive115Tips.value = err?.message || t('login.loginFailed')
     loginLoading.value = false
     drive115Loading.value = false
   }
 }
 
-const poll115Status = async () => {
-  if (!drive115Polling.value) return
+const poll115Status = async (session: number) => {
+  if (session !== drive115Session || !drive115Polling.value) return
   if (!drive115Uid.value || !drive115Time.value || !drive115Sign.value) return
+  const uid = drive115Uid.value
+  const verifier = drive115Verifier.value
+  let nextDelay = 1500
   try {
     const status = await pollDeviceStatus(drive115Uid.value, drive115Time.value, drive115Sign.value)
+    if (session !== drive115Session || !drive115Polling.value) return
     if (status.error) {
       drive115Tips.value = status.error
+      drive115PollFailures++
+      nextDelay = Math.min(30_000, 1500 * 2 ** Math.min(drive115PollFailures, 5))
     } else if (status.state === 0) {
       drive115Tips.value = t('login.qrExpired')
       drive115Polling.value = false
@@ -1039,7 +1076,8 @@ const poll115Status = async () => {
     } else if (status.status === 2) {
       drive115Tips.value = status.msg || t('login.scanSuccessSigningIn')
       drive115Polling.value = false
-      const tokenResp = await exchangeDeviceCode(drive115Uid.value, drive115Verifier.value)
+      const tokenResp = await exchangeDeviceCode(uid, verifier)
+      if (session !== drive115Session) return
       if (tokenResp.error) {
         drive115Tips.value = tokenResp.error
         return
@@ -1050,14 +1088,21 @@ const poll115Status = async () => {
         return
       }
       await refreshDrive115UserInfo(token)
+      if (session !== drive115Session) return
       await saveLogin(token, true)
       loginVisible.value = false
       return
     }
+    if (!status.error) drive115PollFailures = 0
   } catch (err: any) {
+    if (session !== drive115Session) return
     drive115Tips.value = err?.message || t('login.loginFailed')
+    drive115PollFailures++
+    nextDelay = Math.min(30_000, 1500 * 2 ** Math.min(drive115PollFailures, 5))
   }
-  drive115Timer = setTimeout(poll115Status, 1500)
+  if (session === drive115Session && drive115Polling.value) {
+    drive115Timer = setTimeout(() => poll115Status(session), nextDelay)
+  }
 }
 
 const handleRefresh115Qr = () => {
@@ -1391,26 +1436,17 @@ const loginSuccess = (token: ITokenInfo) => {
 
       <div v-else-if="loginProvider === '115'">
         <div id='logindiv'>
-          <div class='logincontent'>
-            <div id="loginframediv" class="loginframe">
-              <a-spin class="loading" :size="32" v-if='loginLoading' :tip="t('common.loading')" />
-              <div class="qrcodeframe" v-if="!loginLoading">
-                <a-image
-                  width='250'
-                  height='250'
-                  :hide-footer='true'
-                  :preview='false'
-                  :show-loader="true"
-                  @click="handleRefresh115Qr"
-                  style="display:inline-block;"
-                  :src="qrCodeUrl">
-                </a-image>
-                <a-alert banner center :show-icon="false" :type="qrCodeStatusType || 'info'">
-                  {{ drive115Tips }}
-                </a-alert>
+          <div class='logincontent drive115-logincontent'>
+            <a-spin class="loading" :size="32" v-if='loginLoading' :tip="t('common.loading')" />
+            <div class="qrcodeframe" v-if="!loginLoading">
+              <div v-if="drive115QrContent" class="cloud189-qrcode-wrap drive115-qrcode-wrap" @click="handleRefresh115Qr">
+                <AntQRCode :value="drive115QrContent" :size="250" color="#000" bg-color="#fff" />
               </div>
+              <a-alert banner center :show-icon="false" :type="qrCodeStatusType || 'info'">
+                {{ drive115Tips }}
+              </a-alert>
             </div>
-            <div class="cloud123-code">
+            <div class="cloud123-code" v-if="!loginLoading">
               <a-input v-model="drive115ClientId" placeholder="App ID（client_id）" allow-clear
                        @change="handleStorageChange" />
               <a-button type="primary" :loading="drive115Loading" @click="handleRefresh115Qr">{{ t('login.refreshQrCode') }}</a-button>
@@ -1564,12 +1600,14 @@ const loginSuccess = (token: ITokenInfo) => {
         <div id='logindiv'>
           <div class='logincontent'>
             <form class="remote-drive-login-form" :class="{ 'remote-drive-embedded': embedded }" @submit.prevent="submitRemoteDrive">
-              <label class="remote-field"><span>{{ t('mediaServer.name') }}</span><a-input v-model="remoteDriveForm.name" :placeholder="t('mediaServer.name')" :disabled="remoteDriveLoading" allow-clear /></label>
-              <label class="remote-field"><span>{{ t('mediaServer.address') }}</span><a-input v-model="remoteDriveForm.url" :placeholder="loginProvider === 'alist' ? 'http://127.0.0.1:5244' : 'https://example.com/dav'" :disabled="remoteDriveLoading" allow-clear /></label>
-              <label class="remote-field"><span>{{ t('mediaServer.username') }}</span><a-input v-model="remoteDriveForm.username" :disabled="remoteDriveLoading" autocomplete="username" allow-clear /></label>
-              <label class="remote-field"><span>{{ t('mediaServer.password') }}</span><a-input-password v-model="remoteDriveForm.password" :disabled="remoteDriveLoading" autocomplete="current-password" allow-clear /></label>
-              <label class="remote-field"><span>{{ t('mediaServer.path') }}</span><a-input v-model="remoteDriveForm.rootPath" placeholder="/" :disabled="remoteDriveLoading" allow-clear /></label>
-              <a-button html-type="submit" type="primary" :loading="remoteDriveLoading">{{ t('mediaServer.connect') }}</a-button>
+              <div class="remote-field"><label for="remote-name">{{ t('mediaServer.name') }}</label><input id="remote-name" v-model="remoteDriveForm.name" :placeholder="t('mediaServer.defaultName', { type: loginProvider === 'alist' ? 'AList' : 'WebDAV' })" :disabled="remoteDriveLoading" autocomplete="off" /></div>
+              <div class="remote-field"><label>{{ t('mediaServer.protocol') }}</label><span class="remote-value">{{ loginProvider === 'alist' ? 'AList' : 'WebDAV' }}</span></div>
+              <div class="remote-field"><label for="remote-url">{{ t('mediaServer.address') }}</label><input id="remote-url" v-model="remoteDriveForm.url" :placeholder="loginProvider === 'alist' ? 'http://127.0.0.1:5244' : 'https://example.com/dav'" :disabled="remoteDriveLoading" autocapitalize="off" spellcheck="false" /></div>
+              <div class="remote-field"><label for="remote-user">{{ t('mediaServer.username') }}</label><input id="remote-user" v-model="remoteDriveForm.username" placeholder="johnappleseed" :disabled="remoteDriveLoading" autocomplete="username" /></div>
+              <div class="remote-field"><label for="remote-password">{{ t('mediaServer.password') }}</label><input id="remote-password" v-model="remoteDriveForm.password" type="password" :placeholder="t('mediaServer.password')" :disabled="remoteDriveLoading" autocomplete="current-password" /></div>
+              <button type="button" class="remote-advanced" :aria-expanded="remoteAdvanced" :disabled="remoteDriveLoading" @click="remoteAdvanced = !remoteAdvanced">{{ t('mediaServer.advanced') }}<ChevronUp v-if="remoteAdvanced" :size="16" /><ChevronDown v-else :size="16" /></button>
+              <div v-if="remoteAdvanced" class="remote-field"><label for="remote-path">{{ t('netShare.startDir') }}</label><input id="remote-path" v-model="remoteDriveForm.rootPath" :placeholder="t('netShare.startDirPlaceholder')" :disabled="remoteDriveLoading" /></div>
+              <div class="remote-actions"><button type="submit" :disabled="remoteDriveLoading || !remoteDriveForm.url.trim()">{{ remoteDriveLoading ? t('mediaServer.connect') + '…' : t('mediaServer.create') }}</button></div>
             </form>
           </div>
         </div>
@@ -1816,6 +1854,19 @@ const loginSuccess = (token: ITokenInfo) => {
   padding: 8px 0;
 }
 
+.drive115-logincontent {
+  height: 430px !important;
+  min-height: 430px !important;
+}
+
+.drive115-logincontent .qrcodeframe {
+  margin: 10px 15px 10px 15px;
+}
+
+.drive115-qrcode-wrap {
+  cursor: pointer;
+}
+
 </style>
 
 <style scoped>
@@ -1823,11 +1874,21 @@ const loginSuccess = (token: ITokenInfo) => {
 .login-embedded .login-provider-content{padding:0;min-width:0}
 .login-embedded .login-provider-heading{display:none}
 .login-embedded #logindiv .logincontent{width:100%;max-width:400px;height:auto;min-height:400px}
+.login-embedded #logindiv .logincontent:has(.remote-drive-embedded){max-width:520px}
 </style>
 
 <style scoped>
-.remote-field{display:grid;grid-template-columns:88px minmax(0,1fr);gap:16px;align-items:center;text-align:right;color:var(--color-text-2);font-size:14px}
-.remote-drive-embedded{padding-top:40px!important;width:100%;max-width:400px!important}
-.remote-drive-embedded :deep(.arco-input-wrapper){background:transparent;border-radius:4px}
-.remote-drive-embedded>.arco-btn{align-self:flex-start;margin-left:104px;min-width:130px}
+.remote-field{display:grid;grid-template-columns:100px minmax(0,1fr);gap:16px;align-items:center;min-height:40px}
+.remote-field>label{text-align:right;color:var(--color-text-2);font-size:14px}
+.remote-field input{min-width:0;width:100%;box-sizing:border-box;background:transparent;border:0;border-radius:4px;color:var(--color-text-1);padding:8px 4px;font:inherit;font-size:14px;outline:none}
+.remote-field input::placeholder{color:var(--color-text-4);opacity:1}
+#remote-name::placeholder{color:var(--color-text-1)}
+.remote-field input:focus-visible{box-shadow:0 0 0 1px #ff8700}
+.remote-value{color:var(--color-text-3);font-size:14px;padding-left:4px}
+.remote-advanced{display:flex;align-items:center;gap:12px;margin:16px 0 4px 116px;padding:8px 0;border:0;background:transparent;color:var(--color-text-2);font:inherit;font-size:14px;cursor:pointer}
+.remote-actions{display:flex;gap:12px;margin:26px 0 0 116px}
+.remote-actions button{min-height:38px;min-width:130px;padding:0 20px;border:1px solid #ff8700;border-radius:9px;background:#ff8700;color:#111;font:inherit;font-size:14px;cursor:pointer}
+.remote-actions button:disabled{opacity:.5;cursor:default}
+.remote-drive-login-form.remote-drive-embedded{gap:0;padding-top:20px!important;width:100%;max-width:520px!important}
+@media(max-width:560px){.remote-field{grid-template-columns:84px minmax(0,1fr);gap:12px}.remote-advanced,.remote-actions{margin-left:96px}}
 </style>

@@ -16,12 +16,12 @@ describe('real cloud E2E configuration', () => {
     const config = loadRealCloudE2EConfig({
       BOXPLAYER_E2E_ACCOUNTS_JSON: JSON.stringify({ accounts: [cliAccount('aliyun'), cliAccount('cloud123')] }),
       BOXPLAYER_E2E_CLOUD123_ACCOUNT_JSON: JSON.stringify({ accounts: [{ ...cliAccount('cloud123'), token: { user_id: 'cloud123_fresh', access_token: 'fresh' } }] }),
-      BOXPLAYER_E2E_REQUIRED_PROVIDERS: 'aliyun,cloud123'
+      BOXPLAYER_E2E_REQUIRED_PROVIDERS: 'aliyun'
     })
     expect(config.accounts.find(account => account.tokenfrom === 'aliyun').refresh_token).toBe('aliyun-refresh')
     expect(config.accounts.filter(account => account.tokenfrom === 'cloud123')).toHaveLength(1)
     expect(config.accounts.find(account => account.tokenfrom === 'cloud123')).toMatchObject({ user_id: 'cloud123_fresh', access_token: 'fresh' })
-    expect(config.targets.map(target => target.provider)).toEqual(['aliyun', 'cloud123'])
+    expect(config.targets.map(target => target.provider)).toEqual(['aliyun'])
   })
 
   it('combines independent 123 and Quark overrides while preserving other accounts and targets', () => {
@@ -29,7 +29,7 @@ describe('real cloud E2E configuration', () => {
     const targets = accounts.map(account => ({ provider: account.provider, path: ['Existing fixtures'], fileName: 'sample.mkv' }))
     const base = {
       BOXPLAYER_E2E_ACCOUNTS_JSON: JSON.stringify({ accounts }),
-      BOXPLAYER_E2E_REQUIRED_PROVIDERS: 'aliyun,quark,cloud123',
+      BOXPLAYER_E2E_REQUIRED_PROVIDERS: 'aliyun',
       BOXPLAYER_E2E_TARGETS_JSON: JSON.stringify(targets)
     }
     const original = loadRealCloudE2EConfig(base)
@@ -57,7 +57,36 @@ describe('real cloud E2E configuration', () => {
       const workflow = readFileSync(`.github/workflows/embedded-mpv-${platform}.yml`, 'utf8')
       expect(workflow).toContain('BOXPLAYER_E2E_QUARK_ACCOUNT_JSON: ${{ secrets.BOXPLAYER_E2E_QUARK_ACCOUNT_JSON }}')
     }
-    expect(readFileSync('e2e/fixtures/boxPlayer.ts', 'utf8')).toContain('process.env.BOXPLAYER_E2E_QUARK_ACCOUNT_JSON)')
+    expect(readFileSync('e2e/fixtures/boxPlayer.ts', 'utf8')).toContain('process.env.BOXPLAYER_E2E_QUARK_ACCOUNT_JSON')
+  })
+
+  it('replaces only the Baidu account and preserves its configured playback target', () => {
+    const original = { accounts: [cliAccount('baidu'), cliAccount('aliyun')] }
+    const target = { provider: 'baidu', path: ['Fixture'], fileName: 'sample.mp4' }
+    const env = {
+      BOXPLAYER_E2E_ACCOUNTS_JSON: JSON.stringify(original),
+      BOXPLAYER_E2E_BAIDU_ACCOUNT_JSON: JSON.stringify({ accounts: [{
+        provider: 'baidu',
+        token: { user_id: 'fresh-baidu', access_token: 'test-baidu-access' }
+      }] }),
+      BOXPLAYER_E2E_REQUIRED_PROVIDERS: 'baidu',
+      BOXPLAYER_E2E_TARGETS_JSON: JSON.stringify([target])
+    }
+    const result = loadRealCloudE2EConfig(env)
+    expect(result.accounts[0]).toMatchObject({ user_id: 'fresh-baidu', access_token: 'test-baidu-access' })
+    expect(result.accounts[1]).toEqual(parseRealCloudAccounts(env.BOXPLAYER_E2E_ACCOUNTS_JSON)[1])
+    expect(result.targets).toEqual([target])
+    expect(() => loadRealCloudE2EConfig({
+      ...env, BOXPLAYER_E2E_BAIDU_ACCOUNT_JSON: JSON.stringify([cliAccount('aliyun')])
+    })).toThrow('BOXPLAYER_E2E_BAIDU_ACCOUNT_JSON 必须只包含一个 baidu 账号')
+  })
+
+  it('passes the Baidu override to all four workflows and renderer seeding', () => {
+    for (const platform of ['linux', 'windows-x64', 'macos-arm64', 'macos-x64']) {
+      const workflow = readFileSync(`.github/workflows/embedded-mpv-${platform}.yml`, 'utf8')
+      expect(workflow).toContain('BOXPLAYER_E2E_BAIDU_ACCOUNT_JSON: ${{ secrets.BOXPLAYER_E2E_BAIDU_ACCOUNT_JSON }}')
+    }
+    expect(readFileSync('e2e/fixtures/boxPlayer.ts', 'utf8')).toContain('process.env.BOXPLAYER_E2E_BAIDU_ACCOUNT_JSON')
   })
 
   it('rejects overrides for other providers or multiple accounts', () => {
@@ -87,16 +116,16 @@ describe('real cloud E2E configuration', () => {
   it('fails closed when a release-required account is missing', () => {
     expect(() => loadRealCloudE2EConfig({
       BOXPLAYER_E2E_ACCOUNTS_JSON: JSON.stringify({ accounts: [cliAccount('aliyun')] }),
-      BOXPLAYER_E2E_REQUIRED_PROVIDERS: 'aliyun,quark'
-    })).toThrow('缺少 CI 测试账号: quark')
+      BOXPLAYER_E2E_REQUIRED_PROVIDERS: 'aliyun,google'
+    })).toThrow('缺少 CI 测试账号: google')
   })
 
-  it('excludes 115, Tianyi 189, Box, Guangya, PikPak and China Mobile from every real-cloud test target', () => {
+  it('excludes 123, 115, Tianyi 189, Box, Guangya, PikPak, China Mobile and Quark from every real-cloud test target', () => {
     const accounts = ALL_REAL_CLOUD_PROVIDERS.map(cliAccount)
     const config = loadRealCloudE2EConfig({
       BOXPLAYER_E2E_ACCOUNTS_JSON: JSON.stringify({ accounts })
     })
-    expect(EXCLUDED_REAL_CLOUD_PROVIDERS).toEqual(['115', '189', 'box', 'guangya', 'pikpak', '139'])
+    expect(EXCLUDED_REAL_CLOUD_PROVIDERS).toEqual(['115', '189', 'box', 'guangya', 'pikpak', '139', 'cloud123', 'quark'])
     expect(config.requiredProviders).toEqual(REAL_CLOUD_PROVIDERS)
     expect(config.targets.map(target => target.provider)).toEqual(REAL_CLOUD_PROVIDERS)
   })

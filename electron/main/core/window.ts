@@ -3,6 +3,7 @@ import { getAsarPath, getStaticPath, getUserDataPath } from '../utils/mainfile'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import is from 'electron-is'
 import { ShowErrorAndRelaunch } from './dialog'
+import { registerStartupLock, startupLockNeedsFullScreen } from './startupLock'
 
 const DEBUGGING = !app.isPackaged && process.env.BOXPLAYER_E2E !== '1'
 const E2E_RENDERER_URL = process.env.BOXPLAYER_E2E_RENDERER_URL || ''
@@ -29,6 +30,8 @@ export const AppWindow: {
   winHeight: 0,
   winTheme: ''
 }
+
+registerStartupLock(() => AppWindow.mainWindow)
 
 let timerUpload: NodeJS.Timeout | undefined
 const debounceUpload = (fn: any, wait: number) => {
@@ -106,7 +109,8 @@ export function createMainWindow() {
     }
   }
   AppWindow.mainWindow = createElectronWindow(AppWindow.winWidth, AppWindow.winHeight, true, 'main', AppWindow.winTheme)
-  if (launchMaximized) AppWindow.mainWindow.maximize()
+  if (startupLockNeedsFullScreen()) AppWindow.mainWindow.setFullScreen(true)
+  else if (launchMaximized) AppWindow.mainWindow.maximize()
 
   const showMainPage = () => {
     if (!AppWindow.mainWindow || AppWindow.mainWindow.isDestroyed()) return
@@ -389,7 +393,13 @@ function handleWinCmd(win: BrowserWindow) {
   hasWindowCommandHandler = true
   ipcMain.on('WebToWindow', (event, data) => {
     const currentWin = BrowserWindow.fromWebContents(event.sender) || win
-    if (data.cmd && data.cmd === 'close') {
+    if (data.cmd === 'move' && Number.isFinite(data.dx) && Number.isFinite(data.dy)) {
+      if (currentWin && !currentWin.isDestroyed()) {
+        const [x, y] = currentWin.getPosition()
+        currentWin.setPosition(Math.round(x + Math.max(-1000, Math.min(1000, data.dx))),
+          Math.round(y + Math.max(-1000, Math.min(1000, data.dy))))
+      }
+    } else if (data.cmd && data.cmd === 'close') {
       event.returnValue = 'close'
       if (currentWin && !currentWin.isDestroyed()) currentWin.close()
     } else if (data.cmd && data.cmd === 'minsize') {
