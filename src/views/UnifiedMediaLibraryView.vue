@@ -4,20 +4,27 @@ import { seriesPreferences, movieVersionItems, generalPreferences, displayScopeA
 import { mediaWatchProgressPercent } from '../utils/mediaWatchProgress'
 import { homeRequests } from '../utils/homeRequestCoordinator'
 import UserDAL from '../user/userdal'
+import AliFile from '../aliapi/file'
+import AliDirFileList from '../aliapi/dirfilelist'
+import { menuOpenFile } from '../utils/openfile'
+import { directVideoHistoryKey, readDirectVideoHistory, type DirectVideoResume } from '../utils/videoProgress'
 import AddFileSourceModal from '../components/AddFileSourceModal.vue'
 import { useUserStore } from '../store'
 import SidebarProBadge from '../components/SidebarProBadge.vue'
 import type { ITokenInfo } from '../user/userstore'
 import { makeScanFolder, tokenRootScanFolders, type ScanSourceTarget } from '../utils/fileSourceRoots'
-import { getWebDavConnections, saveWebDavConnection, removeWebDavConnection, type WebDavConnectionConfig } from '../utils/webdavClient'
+import { getWebDavConnections, isNetShareConnection, saveWebDavConnection, removeWebDavConnection, type WebDavConnectionConfig } from '../utils/webdavClient'
+import NetShareSourceForm from '../components/NetShareSourceForm.vue'
 import { MediaScanner } from '../utils/mediaScanner'
 import { getDriveProviderById, getDriveProviderIcon } from '../utils/driveProvider'
 import { libraryCategoryIcon, librarySidebarCategoryIcon } from '../utils/libraryCategoryIcon'
 
 type ConnectedFileRoot = ScanSourceTarget & { drives?: ScanSourceTarget[]; providerIcon?: string }
 const connectedFileRoots = ref<ConnectedFileRoot[]>([])
+const connectedVideoAccountIDs = ref(new Set<string>())
 async function loadConnectedFileRoots() {
   const users = await UserDAL.GetUserListFromDB()
+  connectedVideoAccountIDs.value = new Set(users.map(user => user.user_id))
   const roots: ConnectedFileRoot[] = users.flatMap(token => {
     const accountRoots = tokenRootScanFolders(token)
     const providerIcon = getDriveProviderIcon(token.tokenfrom)
@@ -38,7 +45,10 @@ async function loadConnectedFileRoots() {
       driveServerId: 'aliyun', drives, providerIcon }]
   })
   for (const connection of getWebDavConnections()) {
-    roots.push({ value: `webdav:${connection.id}`, label: connection.name, driveServerId: 'webdav',
+    // Network shares show their protocol tile (WebDAV/SMB/NFS/FTP) in Files and in 已存储的共享.
+    const kind = connection.kind || 'webdav'
+    const providerIcon = ({ webdav: 'images/source-tiles/webdav.png', alist: 'images/source-tiles/alist.svg', smb: 'images/source-tiles/smb.png', nfs: 'images/source-tiles/nfs.png', ftp: 'images/source-tiles/ftp.png' } as Record<string, string>)[kind] || ''
+    roots.push({ value: `webdav:${connection.id}`, label: connection.name || connection.host || kind.toUpperCase(), driveServerId: 'webdav', providerIcon,
       folder: makeScanFolder({ user_id: connection.id } as ITokenInfo, `webdav:${connection.id}`, '/', connection.name, '/') })
   }
   connectedFileRoots.value = [...new Map(roots.map(root => [root.value, root])).values()]
@@ -720,7 +730,9 @@ const rootEditor = ref<{ key: string; name: string; connection?: WebDavConnectio
 async function saveRootEditor() {
   const editor = rootEditor.value
   if (!editor || !editor.name.trim()) return
-  if (editor.connection) {
+  if (editor.connection && isNetShareConnection(editor.connection)) {
+    saveWebDavConnection({ ...editor.connection, name: editor.name.trim() })
+  } else if (editor.connection) {
     try {
       const url = new URL(editor.connection.url)
       if (!['http:', 'https:'].includes(url.protocol)) return
@@ -728,6 +740,16 @@ async function saveRootEditor() {
     saveWebDavConnection({ ...editor.connection, name: editor.name.trim() })
   }
   sourceOverrides.value[editor.key] = { ...sourceOverrides.value[editor.key], name: editor.name.trim() }
+  persistSources()
+  await loadConnectedFileRoots()
+  rootEditor.value = undefined
+}
+async function onNetShareEdited(connection: WebDavConnectionConfig) {
+  const editor = rootEditor.value
+  if (!editor) return
+  const name = connection.name.trim() || editor.name.trim()
+  saveWebDavConnection({ ...connection, name })
+  sourceOverrides.value[editor.key] = { ...sourceOverrides.value[editor.key], name }
   persistSources()
   await loadConnectedFileRoots()
   rootEditor.value = undefined
@@ -842,7 +864,7 @@ const folderFavoriteCards = computed(() => serverFolderFavorites.value.filter(en
  action: () => entry.item.id === '__all__' ? showServer(entry.item.serverId) : entry.item.kind === 'folder' ? showServer(entry.item.serverId, { kind: 'library-page', libraryId: entry.item.id, title: entry.item.title }) : showServer(entry.item.serverId, { kind: 'item-detail', itemId: entry.item.id, title: entry.item.title }) })))
 const fileSourceCards = computed(() => [
  ...folderFavoriteCards.value.map(card => ({ ...card, server: null, providerIcon: '', icon: Folder })),
- ...libraryBookmarks.favorites.filter(route => route.startsWith('home-entry/')).map(route => ({ key: 'server-category:' + route, title: libraryBookmarks.titles[route] || categoryBookmarkTitle(route), server: null, providerIcon: '', icon: Folder, action: () => showCatalog(route) })),...connectedFileRoots.value.filter(root => !media.folders.some(folder => folder.isFavorite !== false && rootFolderMatchesAny(root, folder))).map(root => ({ key: `root:${root.value}`, title: sourceOverrides.value[`root:${root.value}`]?.name || root.label, server: null, providerIcon: root.providerIcon || '', icon: root.driveServerId === 'webdav' ? Network : Folder, action: () => { void openConnectedFileRoot(root) } })), ...registry.servers.map(server => ({ key: 'server:' + server.id, title: server.name, server, providerIcon: '', icon: Star, action: () => showServer(server.id) })), ...media.folders.filter(folder => (!isConnectedRootFolder(folder) || folder.isDriveRootFavorite) && folder.isFavorite !== false).map(folder => ({ key: 'folder:' + folder.id, title: folder.name, subtitle: folder.isDriveRootFavorite ? rootFavoriteDriveName(folder) : '', server: null, providerIcon: folder.isDriveRootFavorite || ['/', '0', 'root', 'quark_root', 'baidu_root'].includes(folder.fileId) ? getDriveProviderIcon(getDriveProviderById(folder.driveId || folder.driveServerId)) : '', icon: Star, action: () => { void showFolder(folder) } }))].sort((a,b) => ((sourceOverrides.value[a.key]?.order ?? 9999) - (sourceOverrides.value[b.key]?.order ?? 9999)) || a.title.localeCompare(b.title) * (fileSourceDescending.value ? -1 : 1)))
+ ...libraryBookmarks.favorites.filter(route => route.startsWith('home-entry/')).map(route => ({ key: 'server-category:' + route, title: libraryBookmarks.titles[route] || categoryBookmarkTitle(route), server: null, providerIcon: '', icon: Folder, action: () => showCatalog(route) })),...connectedFileRoots.value.filter(root => !media.folders.some(folder => folder.isFavorite !== false && rootFolderMatchesAny(root, folder) && (!isConnectedRootFolder(folder) || folder.isDriveRootFavorite))).map(root => ({ key: `root:${root.value}`, title: sourceOverrides.value[`root:${root.value}`]?.name || root.label, server: null, providerIcon: root.providerIcon || '', icon: root.driveServerId === 'webdav' ? Network : Folder, action: () => { void openConnectedFileRoot(root) } })), ...registry.servers.map(server => ({ key: 'server:' + server.id, title: server.name, server, providerIcon: '', icon: Star, action: () => showServer(server.id) })), ...media.folders.filter(folder => (!isConnectedRootFolder(folder) || folder.isDriveRootFavorite) && folder.isFavorite !== false).map(folder => ({ key: 'folder:' + folder.id, title: folder.name, subtitle: folder.isDriveRootFavorite ? rootFavoriteDriveName(folder) : '', server: null, providerIcon: folder.isDriveRootFavorite || ['/', '0', 'root', 'quark_root', 'baidu_root'].includes(folder.fileId) ? getDriveProviderIcon(getDriveProviderById(folder.driveId || folder.driveServerId)) : '', icon: Star, action: () => { void showFolder(folder) } }))].sort((a,b) => ((sourceOverrides.value[a.key]?.order ?? 9999) - (sourceOverrides.value[b.key]?.order ?? 9999)) || a.title.localeCompare(b.title) * (fileSourceDescending.value ? -1 : 1)))
 function sourceServer(key: string) { return registry.servers.find(server => key === 'source:server:' + server.id) }
 function openFileSource(card: typeof fileSourceCards.value[number]) { if (fileSourceReordering.value || sourceDragKey.value || sourceDragSuppressClick) return; if (!fileSourceSelection.value) { card.action(); return }; selectedFileSources.value = selectedFileSources.value.includes(card.key) ? selectedFileSources.value.filter(key => key !== card.key) : [...selectedFileSources.value, card.key] }
 const serverRootSelection = ref(false)
@@ -882,6 +904,20 @@ function togglePickerRootFavorite(id: string) {
     for (const folder of [...media.folders]) if (folder.isDriveRootFavorite && rootFolderMatches(root, folder)) media.removeFolder(folder.id)
     persistSources()
   })
+}
+/** Saved from the inline editor in 已存储的共享: same storage as the source card's 编辑共享. */
+async function savePickerSource(id: string, name: string, connection?: WebDavConnectionConfig) {
+  const key = `root:${id}`
+  if (connection) saveWebDavConnection({ ...connection, name })
+  sourceOverrides.value[key] = { ...sourceOverrides.value[key], name }
+  persistSources()
+  await loadConnectedFileRoots()
+}
+/** Delete from the inline editor; confirms first like the source card's 删除. */
+async function deletePickerSource(id: string) {
+  if (id.startsWith('server:')) { addRegistryView.value?.deleteServer(id.slice(7)); return }
+  sourceMenu.value = { key: `root:${id}`, x: 0, y: 0 }
+  await sourceAction('delete')
 }
 async function fileSourceConnected() {
   await loadConnectedFileRoots().catch(() => undefined)
@@ -1190,11 +1226,61 @@ const remoteRows = computed<Row[]>(() => {
   }
   return result
 })
+const directVideoHistory = ref(readDirectVideoHistory())
+
+async function resumeDirectVideo(entry: DirectVideoResume) {
+  const metadata = await AliFile.ApiFileInfo(entry.user_id, entry.drive_id, entry.file_id)
+  if (!metadata || typeof metadata !== 'object') {
+    message.error(t('video.getVideoUrlFailed'))
+    return
+  }
+  const file = AliDirFileList.getFileInfo(entry.user_id, {
+    ...metadata, file_id: entry.file_id, drive_id: entry.drive_id,
+    name: metadata.name || entry.file_name,
+    parent_file_id: metadata.parent_file_id || entry.parent_file_id,
+    type: 'file'
+  }, '', entry.drive_id)
+  const accountFile = { ...file, user_id: entry.user_id }
+  await menuOpenFile(accountFile, '', { requireFileAccount: true })
+}
+
 const resumeRows = computed<Row[]>(() => {
-  const resume = (generalPreferences.recentlyPlayed ? media.continueWatching : []).filter(item => mediaWatchProgressPercent(item) < 100).map(item => ({ ...localCard(item, true), action: () => { void videoView.value?.resumeMedia(item) } }))
+  const resume: Card[] = (generalPreferences.recentlyPlayed ? media.continueWatching : []).filter(item => mediaWatchProgressPercent(item) < 100).map(item => ({ ...localCard(item, true), action: () => { void videoView.value?.resumeMedia(item) } }))
+  if (generalPreferences.recentlyPlayed) {
+    resume.unshift(...directVideoHistory.value.filter(entry =>
+      connectedVideoAccountIDs.value.has(entry.user_id) || getWebDavConnections().some(connection => entry.drive_id === `webdav:${connection.id}`)
+    ).map(entry => ({
+      key: 'direct-file:' + JSON.stringify([entry.user_id, entry.drive_id, entry.file_id]),
+      title: entry.file_name,
+      progress: 100 * entry.position / entry.duration,
+      sortValues: { title: entry.file_name, addedAt: entry.updatedAt },
+      action: () => { void resumeDirectVideo(entry).catch(() => message.error(t('video.getVideoUrlFailed'))) }
+    })))
+  }
   for (const server of registry.servers.filter(server => !homePreferences.hidden.includes('source:server:' + server.id))) resume.push(...content.currentHomeData(server.id).resume.map(item => ({ ...serverCard(item, true), action: () => { void serverPosterAction(item, 'play') } })))
   if (resume.length) return [{ key: 'resume', title: t('media.continueWatching'), cards: resume, landscape: true, more: () => showHomeRow('resume') }]
   return []
+})
+const topLandscapeRow = computed<Row | undefined>(() => {
+  if (resumeRows.value.length) return rows.value.find(row => row.key === 'resume')
+  const cards: Card[] = media.recentlyAdded
+    .filter(item => !item.folderId || !homePreferences.hidden.includes('source:folder:' + item.folderId))
+    .map(item => ({ ...localCard(item, true), progress: undefined }))
+  for (const server of registry.servers) {
+    if (homePreferences.hidden.includes('source:server:' + server.id)) continue
+    for (const library of content.currentHomeData(server.id).libraries) {
+      cards.push(...library.items.map(item => ({ ...serverCard(item, true), progress: undefined })))
+    }
+  }
+  const seen = new Set<string>()
+  const recent = cards.filter(card => {
+    if (seen.has(card.key)) return false
+    seen.add(card.key)
+    return true
+  })
+    .sort((left, right) => new Date(right.sortValues?.addedAt || 0).getTime() - new Date(left.sortValues?.addedAt || 0).getTime())
+    .slice(0, 12)
+  return recent.length ? { key: 'recent-landscape', title: t('media.recentlyAdded'), cards: recent, landscape: true, more: () => { void showCategory('recently-added') } } : undefined
 })
 const rawRows = computed<Row[]>(() => [...resumeRows.value, ...localRows.value, ...remoteRows.value])
 const homeItems = computed<HomeManagementItem[]>(() => withFixedHomeMenus([
@@ -1511,6 +1597,7 @@ let refreshQueuedForce = false
 let disposed = false
 let lastPlaybackSnapshot = ''
 function syncPlayback() {
+  directVideoHistory.value = readDirectVideoHistory()
   void loadConnectedFileRoots().catch(() => undefined)
   try {
     const raw = localStorage.getItem('MediaLibrary_ContinueWatching') || '[]'
@@ -1527,6 +1614,7 @@ function syncPlayback() {
   } catch { /* Keep the current library when a stored snapshot is unavailable. */ }
 }
 function handleStorage(event: StorageEvent) {
+  if (event.key === directVideoHistoryKey) directVideoHistory.value = readDirectVideoHistory()
   if (event.key === 'MediaLibrary_ContinueWatching' || event.key === null) syncPlayback()
 }
 async function refresh(force = true) {
@@ -1783,13 +1871,13 @@ watch(() => favoriteCards.value.map(card => card.key), keys => { void placement.
         </a-dropdown>
         <button v-if="section === 'files'" class="add-source file-source-add" @click="showAddFileSource = true"><Plus :size="16" />{{ t('unified.addSource') }}</button>
       </header>
-      <div v-if="media.isScanning" class="library-scan-status" role="status" aria-live="polite" aria-atomic="true" data-testid="library-scan-status">
+      <div v-if="media.isScanning && section !== 'server'" class="library-scan-status" role="status" aria-live="polite" aria-atomic="true" data-testid="library-scan-status">
         <MediaLoadingIndicator :size="18" aria-hidden="true" />
         <span>{{ t('footer.scanningMedia') }}</span>
         <span v-if="media.scanProgress > 0" class="library-scan-count">{{ t('unified.scanProcessed', { count: media.scanProgress }) }}</span>
       </div>
       <div v-show="section === 'home' || (section === 'collection' && selectedHomeRowKey === 'sources')" class="unified-home" :class="{ 'source-screen-empty': section === 'home' && homeIsEmpty }" ref="homeElement" @scroll="section === 'home' && (homeScrollTop = ($event.target as HTMLElement).scrollTop)">
-        <UnifiedMediaRow v-for="row in rows.filter(item => item.key === 'resume')" v-show="!(section === 'collection' && selectedHomeRowKey === 'sources')" :key="row.key" :row="row" />
+        <UnifiedMediaRow v-for="row in (topLandscapeRow ? [topLandscapeRow] : [])" v-show="!(section === 'collection' && selectedHomeRowKey === 'sources')" :key="row.key" :row="row" />
         <template v-for="entry in (section === 'home' && homeIsEmpty ? [] : homeLayout)" :key="entry.item.id">
         <section v-if="entry.item.id === 'sources'" class="home-row source-shortcuts">
           <div class="row-heading"><h2>{{ entry.item.title }}</h2><button @click="openHomeMenu('sources')">{{ t('mediaServer.seeAllPlain') }}</button></div>
@@ -1896,7 +1984,8 @@ watch(() => favoriteCards.value.map(card => card.key), keys => { void placement.
       <a-input v-model="sourceText" />
     </a-modal>
     <a-modal :visible="!!rootEditor" :title="t('unified.editShare')" :footer="false" @cancel="rootEditor = undefined">
-      <a-form v-if="rootEditor" :model="rootEditor" layout="vertical" @submit-success="saveRootEditor">
+      <NetShareSourceForm v-if="rootEditor?.connection && isNetShareConnection(rootEditor.connection)" :key="rootEditor.connection.id" :kind="rootEditor.connection.kind" :existing="rootEditor.connection" :source-name="rootEditor.name" @saved="onNetShareEdited" @cancel="rootEditor = undefined" />
+      <a-form v-else-if="rootEditor" :model="rootEditor" layout="vertical" @submit-success="saveRootEditor">
         <a-form-item :label="t('unified.sourceLocalName')"><a-input v-model="rootEditor.name" /></a-form-item>
         <template v-if="rootEditor.connection">
           <a-form-item :label="t('unified.sourceUrl')"><a-input v-model="rootEditor.connection.url" /></a-form-item>
@@ -1921,7 +2010,7 @@ watch(() => favoriteCards.value.map(card => card.key), keys => { void placement.
     </a-modal>
   </div>
 <MediaShareModal /><MediaPersonalRatingModal /><CustomMediaSeriesModal /><WatchingUpdateModal />
-<AddFileSourceModal @toggle-root="togglePickerRootFavorite" :device-name="localDeviceName" :sources="connectedFileRoots.map(root => ({ id: root.value, name: root.label, icon: root.providerIcon, favorite: rootIsFavorite(root), folder: root.folder, driveServerId: root.driveServerId, drives: root.drives })).concat(registry.servers.map(server => ({ id: 'server:' + server.id, name: server.name, icon: '', favorite: false, server, folder: makeScanFolder({ user_id: server.userId || '' } as ITokenInfo, 'media_server', '__all__', server.name), driveServerId: 'media_server', drives: undefined })))"  :visible="showAddFileSource" @close="showAddFileSource = false" @connected="fileSourceConnected" />
+<AddFileSourceModal @toggle-root="togglePickerRootFavorite" :device-name="localDeviceName" :sources="connectedFileRoots.map(root => ({ id: root.value, name: root.label, icon: root.providerIcon, favorite: rootIsFavorite(root), folder: root.folder, driveServerId: root.driveServerId, drives: root.drives })).concat(registry.servers.map(server => ({ id: 'server:' + server.id, name: server.name, icon: '', favorite: false, server, folder: makeScanFolder({ user_id: server.userId || '' } as ITokenInfo, 'media_server', '__all__', server.name), driveServerId: 'media_server', drives: undefined })))"  :visible="showAddFileSource" @close="showAddFileSource = false" @connected="fileSourceConnected" @save-source="savePickerSource" @delete-source="deletePickerSource" />
 <LimitReachedModal :visible="showProPurchase" @update:visible="showProPurchase = $event" />
 <TraktAccountModal :visible="showTraktAccount" @close="showTraktAccount = false" />
 </template>
@@ -1969,7 +2058,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .library-scan-status{display:flex;align-items:center;gap:10px;flex-shrink:0;padding:10px 20px;border-bottom:1px solid var(--color-border-2);background:var(--color-bg-2);color:var(--color-text-1);font-size:13px}.library-scan-status>svg{color:#ff8800}.library-scan-count{color:var(--color-text-3)}
 .unified-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}.unified-toolbar{height:56px;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid var(--color-border-2)}
 .unified-toolbar h1{font-size:15px;font-weight:600;margin:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.unified-toolbar{gap:12px}.round-button{display:grid;place-items:center;border:1px solid var(--color-border-2);background:var(--color-fill-1);border-radius:50%;width:36px;height:36px;flex-shrink:0}.round-button:disabled{cursor:wait;opacity:.6}.add-source{display:inline-flex;align-items:center;gap:6px;border:0;border-radius:20px;padding:10px 16px;background:#ff8b25;color:#fff}button:focus-visible{outline:2px solid #ff8b25;outline-offset:2px}
-.unified-home{flex:1;overflow-y:auto;padding:24px 28px}.home-row{margin-bottom:26px}h2{font-size:19px;font-weight:600;margin:0 0 14px}
+.unified-home{flex:1;overflow-y:auto;padding:24px 28px}.home-row{margin-bottom:26px}.unified-home:not(.category-collection) :deep(.home-row){padding-bottom:24px;border-bottom:1px solid var(--color-border-2)}h2{font-size:19px;font-weight:600;margin:0 0 14px}
 :global(body #xbybody .unified-library .music-pane > .unified-toolbar) { background:#fafbfc!important; color:#20242c; border-bottom-color:#e9ecf0; }
 :global(body[arco-theme='dark'] #xbybody .unified-library .music-pane > .unified-toolbar) { background:#181c1f!important; color:#edf0f2; border-bottom-color:#292e33; }
 :global(body[arco-theme='dark'] #xbybody .unified-library .unified-home:not(.category-collection)){background:#1e1e1e!important}

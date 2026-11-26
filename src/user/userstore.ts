@@ -3,7 +3,7 @@ import UserDAL from './userdal'
 
 
 export interface ITokenInfo {
-  tokenfrom: 'aliyun' | 'cloud123' | '115' | '139' | '189' | 'guangya' | 'baidu' | 'pikpak' | 'quark' | 'dropbox' | 'onedrive' | 'box' | 'google' | 'webdav' | 'alist' | 'unknown'
+  tokenfrom: 'aliyun' | 'cloud123' | '115' | '139' | '189' | 'guangya' | 'baidu' | 'pikpak' | 'quark' | 'dropbox' | 'onedrive' | 'box' | 'google' | 'webdav' | 'alist' | 'smb' | 'nfs' | 'ftp' | 'unknown'
 
   access_token: string
   refresh_token: string
@@ -13,6 +13,9 @@ export interface ITokenInfo {
   open_api_access_token: string
   open_api_refresh_token: string
   open_api_expires_in: number
+
+  cloud189_family_session_key?: string
+  cloud189_family_session_secret?: string
 
   signature: string
   device_id: string

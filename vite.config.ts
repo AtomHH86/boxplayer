@@ -9,6 +9,8 @@ import pkg from './package.json'
 const sharedAlias = {
   '@shared': path.resolve(__dirname, 'shared'),
   '@main':   path.resolve(__dirname, 'electron/main'),
+  // mediary-scout workflow engine (git subtree). Import files by path; its index pulls in pg.
+  '@mediary': path.resolve(__dirname, 'vendor/mediary-workflow/src'),
   '@earendil-works/pi-ai/compat': path.resolve(__dirname, 'src/services/agent/piCompatBrowser.ts'),
   '@earendil-works/pi-agent-core/dist/agent.js': path.resolve(__dirname, 'node_modules/@earendil-works/pi-agent-core/dist/agent.js')
 }
@@ -26,6 +28,7 @@ export default defineConfig(({ command, isPreview }) => {
 
   const isBuild = command === 'build'
   return {
+    base: './',
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
     },
@@ -36,6 +39,10 @@ export default defineConfig(({ command, isPreview }) => {
       // on CSS attached to a lazy-loaded Vue chunk.
       cssCodeSplit: false,
       rollupOptions: {
+        input: {
+          index: path.resolve(__dirname, 'index.html'),
+          desktopLyrics: path.resolve(__dirname, 'desktop-lyrics.html')
+        },
         output: {
           chunkFileNames: '[name].js',
           entryFileNames: '[name].js',

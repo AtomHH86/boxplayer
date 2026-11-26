@@ -498,6 +498,13 @@ const playResume = computed(() => {
   const position = localPosition || (matchesFile ? record?.lastPlayedPositionSeconds || (record?.watchProgress || 0) * duration : 0)
   return detailResumeState(position, duration, matchesFile ? (record?.watchProgress || 0) * 100 : undefined)
 })
+function episodeProgressPercent(episode: { seasonNumber: number; episodeNumber: number }): number {
+  const id = `${detailSeriesId(String(activeMediaItem.value.id))}_${episode.seasonNumber}_${episode.episodeNumber}`
+  const record = mediaStore.continueWatching.find(item => item.id === id)
+  const fraction = record?.watchProgress || 0
+  return Number.isFinite(fraction) && fraction > 0 && fraction < 1 ? fraction * 100 : 0
+}
+
 const playProgressPercent = computed(() => playResume.value?.percent ?? null)
 
 const playButtonLabel = computed(() => {
@@ -611,7 +618,7 @@ const playShuffledEpisodes = () => {
   const first = episodes[0]
   if (!first) return
   const playlist = episodes.map(episode => buildPlaylistEntry(buildAliFileModel(playbackVersions(episode.driveFiles)[0]), `${activeMediaItem.value.name} · S${episode.seasonNumber}E${episode.episodeNumber}`))
-  void menuOpenFile(buildAliFileModel(playbackVersions(first.driveFiles)[0]), '', { customPlaylistLabel: activeMediaItem.value.name, customPlaylist: playlist })
+  void menuOpenFile(buildAliFileModel(playbackVersions(first.driveFiles)[0]), '', { libraryPlayback: true, customPlaylistLabel: activeMediaItem.value.name, customPlaylist: playlist })
 }
 
 const buildAliFileModel = (driveFile: DriveFileItem): IAliGetFileModel => {
@@ -699,7 +706,7 @@ const playEpisode = (episode: MediaEpisode, loop = false) => {
   if (episode.driveFiles && episode.driveFiles.length > 0) {
     const driveFile = (manuallySelectedVersion.value ? episode.driveFiles.find(file => file.id === selectedDriveFileId.value) : orderedVersions(episode.driveFiles, seriesPreferences.playbackVersion === 'auto' ? seriesPreferences.defaultVersion : seriesPreferences.playbackVersion)[0]) || episode.driveFiles[0]
     const aliFile = buildAliFileModel(driveFile)
-    menuOpenFile(aliFile, '', {
+    menuOpenFile(aliFile, '', { libraryPlayback: true,
       customPlaylistLabel: props.activePlaylistName || '',
       customPlaylist: currentPlaylistEntries.value,
       playlistLoop: loop
@@ -711,7 +718,7 @@ const playMovie = (loop = false) => {
   if (activeMediaItem.value.driveFiles && activeMediaItem.value.driveFiles.length > 0) {
     const driveFile = (manuallySelectedVersion.value ? activeMediaItem.value.driveFiles.find(file => file.id === selectedDriveFileId.value) : orderedVersions(activeMediaItem.value.driveFiles, seriesPreferences.playbackVersion === 'auto' ? seriesPreferences.defaultVersion : seriesPreferences.playbackVersion)[0]) || activeMediaItem.value.driveFiles[0]
     const aliFile = buildAliFileModel(driveFile)
-    menuOpenFile(aliFile, '', {
+    menuOpenFile(aliFile, '', { libraryPlayback: true,
       customPlaylistLabel: props.activePlaylistName || '',
       customPlaylist: currentPlaylistEntries.value,
       playlistLoop: loop
@@ -1070,6 +1077,9 @@ const getCastInitial = (name?: string): string => {
               </div>
               <div v-if="episode.stillPath || activeMediaItem.posterUrl" class="thumbnail-placeholder" style="display: none;">
                 <MediaPosterPlaceholder kind="resume" />
+              </div>
+              <div v-if="episodeProgressPercent(episode) > 0" class="detail-episode-progress" aria-hidden="true">
+                <div :style="{ width: `${episodeProgressPercent(episode)}%` }"></div>
               </div>
               <button type="button" class="episode-play-overlay" :aria-label="`播放第 ${episode.episodeNumber} 集`" @click.stop="handleEpisodePlay(episode)">
                 <Play :size="20" fill="currentColor" aria-hidden="true" />
@@ -3315,4 +3325,29 @@ body:not([arco-theme='dark']) #xbybody .media-detail {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+</style>
+
+<style scoped>
+#xbybody .media-detail .play-button,
+#xbybody .media-detail .play-button.has-resume {
+  color: #111;
+  background: rgba(160, 157, 164, .35);
+  backdrop-filter: blur(16px);
+}
+#xbybody .media-detail .play-button-progress {
+  background: #fff;
+  border-right: 0;
+}
+.detail-episode-progress {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 8px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .3);
+  overflow: hidden;
+  pointer-events: none;
+}
+.detail-episode-progress > div { height: 100%; background: #fff; border-radius: inherit; }
 </style>

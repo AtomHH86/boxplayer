@@ -9,12 +9,16 @@ import { ShowError } from './dialog'
 import { getAsarPath, getStaticPath, getUserDataPath } from '../utils/mainfile'
 import { registerMediaImageCacheIpc } from '../mediaImageCache'
 import { registerTraktIpc } from '../trakt'
+import { registerNetShareIpc } from '../netShare/ipc'
 import { createHash } from 'crypto'
 import { getMotrixApplicationRpcPort } from '../aria/runtime'
 import { request as httpsRequest } from 'https'
 import { requestPanHub, requestPanHubStream } from './panHubRequest'
 import { embeddedMpvBridge } from '../mpv/embeddedMpvBridge'
+import { registerSeekThumbnailIpc } from '../mpv/seekThumbnail'
+import { registerLocalVideoPreviewIpc } from '../mpv/localVideoPreview'
 import { registerMusicAudioIpc } from '../mpv/musicAudioBridge'
+import { registerMusicHeadIpc } from '../musicHeadReader'
 import {
   getBookMeta,
   isBookIndexed,
@@ -36,15 +40,11 @@ import {
   wipeAllData,
   destroyDb
 } from '../reedy/ReedyService'
-import { addMediaAcquisitionCandidate, addMediaAcquisitionEvent, beginMediaAcquisitionCandidateVerification, beginMediaAcquisitionOrganizing, beginMediaAcquisitionSearch, cancelMediaAcquisitionRun, claimRunnableMediaAcquisitionRun, clearCompletedMediaAcquisitionRuns, clearMediaAcquisitionNotifications, completeMediaAcquisitionCandidate, completeMediaAcquisitionRun, continueMediaAcquisitionAfterPartial, createMediaAcquisitionRun, createMediaAcquisitionTracking, endMediaAcquisitionTracking, failMediaAcquisitionCandidate, failMediaAcquisitionRun, finishMediaAcquisitionSearchWithoutCandidates, forceCancelMediaAcquisitionRun, getMediaAcquisitionAgentSandbox, getMediaAcquisitionAgentSession, getMediaAcquisitionCandidateBaseline, getMediaAcquisitionTarget, listMediaAcquisitionNotifications, listMediaAcquisitionRuns, listMediaAcquisitionStates, listMediaAcquisitionTracking, listRunnableMediaAcquisitionRuns, markMediaAcquisitionCandidateTransferring, markMediaAcquisitionNoCoverage, markMediaAcquisitionNotificationsRead, partialMediaAcquisitionCandidate, recordMediaAcquisitionCandidateBaseline, recordMediaAcquisitionExternalTask, recordMediaAcquisitionTransferIntent, releaseMediaAcquisitionRunClaim, renewMediaAcquisitionRunClaim, retryMediaAcquisitionCandidate, retryMediaAcquisitionSearch, saveMediaAcquisitionAgentSandbox, saveMediaAcquisitionAgentSession, selectMediaAcquisitionCandidate, updateMediaAcquisitionExternalTaskProgress, upsertMediaAcquisitionTracking } from '../mediaAcquisition/MediaAcquisitionService'
-import { getMediaAcquisitionProviderTransferStatus, submitMediaAcquisitionExternalUrl, submitMediaAcquisitionProviderShareImport, submitMediaAcquisitionProviderTransfer } from '../mediaAcquisition/MediaProviderAdapter'
-import type { CreateMediaAcquisitionCandidateInput, CreateMediaAcquisitionRunInput, CreateMediaAcquisitionTrackingInput, MediaAcquisitionEvent, MediaAcquisitionFileSnapshot, MediaAcquisitionPhase } from '@shared/types/mediaAcquisition'
-import { getAssrtSubtitleFiles, searchAssrtSubtitles } from '../mediaAcquisition/assrt'
 import { addWorkspaceEvidence, addWorkspaceEvent, approveWorkspacePlan, archiveWorkspaceTask, cancelWorkspaceTask, completeWorkspaceTask, createWorkspaceTask, getWorkspaceTask, getWorkspaceTaskV1Audit, listWorkspaceTasks, rejectWorkspacePlan, restoreWorkspaceTask, resumeWorkspaceTask, saveWorkspacePlan, updateWorkspacePlanSelection } from '../workspaceAgent/WorkspaceAgentService'
+import { registerMediaryIpc } from '../mediary/ipc'
 import type { CreateWorkspacePlanInput, CreateWorkspaceTaskInput, UpdateWorkspacePlanSelectionInput, WorkspaceExecutionEvent } from '@shared/types/workspaceAgent'
 import { agentV1Status, getAgentWorkflow } from '../agent/AgentControlService'
 import { beginAiSearchV1Audit, collectAiSearchStorageStats, confirmAiSearchV1Write, finishAiSearchV1Audit, recordAiSearchV1Evidence, type BeginAiSearchV1AuditInput, type RecordAiSearchV1EvidenceInput } from '../aiSearch/AiSearchV1Bridge'
-import { beginMediaAcquisitionV1Transfer, completeMediaAcquisitionV1Transfer, type MediaAcquisitionTransferTicket } from '../mediaAcquisition/MediaAcquisitionV1Bridge'
 import { beginDocumentV1Audit, finishDocumentV1Audit, recordDocumentV1Citation, type DocumentAgentV1Source } from '../documentInsight/DocumentAgentV1Bridge'
 import { runBundledCloudDriveCli } from '../agent/CloudDriveCliGateway'
 import { completeDocumentReadingUnit, createDocumentReadingJob, failDocumentReadingUnit, getDocumentReadingJob, listDocumentReadingJobs, setDocumentReadingJobStatus } from '../documentInsight/DocumentReadingService'
@@ -230,6 +230,7 @@ export default class ipcEvent {
     }
     registerMediaImageCacheIpc()
     registerTraktIpc()
+    registerNetShareIpc()
     this.handleReedy()
     this.handleMediaAcquisition()
     this.handleDocumentReading()
@@ -238,6 +239,9 @@ export default class ipcEvent {
   private static handleMpvEmbedded() {
     ipcMain.handle('MpvEmbedded:getCapability', async () => embeddedMpvBridge.getCapability())
     registerMusicAudioIpc()
+    registerMusicHeadIpc()
+    registerSeekThumbnailIpc()
+    registerLocalVideoPreviewIpc()
     ipcMain.handle('MpvEmbedded:load', async (event, data) => embeddedMpvBridge.load(data || {}, event.sender))
     ipcMain.handle('MpvEmbedded:control', async (_event, data) => embeddedMpvBridge.control(data || {}))
     ipcMain.handle('MpvEmbedded:getStatus', async () => embeddedMpvBridge.getStatus())
@@ -245,56 +249,7 @@ export default class ipcEvent {
   }
 
   private static handleMediaAcquisition() {
-    ipcMain.handle('mediaAcquisition:create', (_event, input: CreateMediaAcquisitionRunInput) => createMediaAcquisitionRun(input))
-    ipcMain.handle('mediaAcquisition:list', (_event, limit?: number) => listMediaAcquisitionRuns(limit))
-    ipcMain.handle('mediaAcquisition:listStates', () => listMediaAcquisitionStates())
-    ipcMain.handle('mediaAcquisition:listRunnable', (_event, limit?: number) => listRunnableMediaAcquisitionRuns(limit))
-    ipcMain.handle('mediaAcquisition:claimRunnable', (_event, workerId: string, runId?: string) => claimRunnableMediaAcquisitionRun(workerId, runId))
-    ipcMain.handle('mediaAcquisition:releaseClaim', (_event, runId: string, workerId: string) => releaseMediaAcquisitionRunClaim(runId, workerId))
-    ipcMain.handle('mediaAcquisition:renewClaim', (_event, runId: string, workerId: string) => renewMediaAcquisitionRunClaim(runId, workerId))
-    ipcMain.handle('mediaAcquisition:listTracking', (_event, limit?: number) => listMediaAcquisitionTracking(limit))
-    ipcMain.handle('mediaAcquisition:createTracking', (_event, input: CreateMediaAcquisitionTrackingInput) => createMediaAcquisitionTracking(input))
-    ipcMain.handle('mediaAcquisition:getTarget', (_event, targetId: string) => getMediaAcquisitionTarget(targetId))
-    ipcMain.handle('mediaAcquisition:endTracking', (_event, trackingId: string) => endMediaAcquisitionTracking(trackingId))
-    ipcMain.handle('mediaAcquisition:upsertTracking', (_event, data: { targetId: string; seasonNumber: number; totalEpisodes: number; latestAiredEpisode: number; obtainedEpisodeNumbers: number[]; missingEpisodes: number[]; status: 'tracking' | 'complete' | 'ended'; nextCheckAt?: number }) => upsertMediaAcquisitionTracking(data.targetId, data.seasonNumber, data.totalEpisodes, data.latestAiredEpisode, data.obtainedEpisodeNumbers, data.missingEpisodes, data.status, data.nextCheckAt))
-    ipcMain.handle('mediaAcquisition:listNotifications', (_event, limit?: number) => listMediaAcquisitionNotifications(limit))
-    ipcMain.handle('mediaAcquisition:markNotificationsRead', (_event, ids?: string[]) => markMediaAcquisitionNotificationsRead(ids))
-    ipcMain.handle('mediaAcquisition:clearNotifications', () => clearMediaAcquisitionNotifications())
-    ipcMain.handle('mediaAcquisition:clearCompletedRuns', () => clearCompletedMediaAcquisitionRuns())
-    ipcMain.handle('mediaAcquisition:getAgentSession', (_event, runId: string) => getMediaAcquisitionAgentSession(runId))
-    ipcMain.handle('mediaAcquisition:saveAgentSession', (_event, runId: string, messages: unknown[]) => saveMediaAcquisitionAgentSession(runId, messages))
-    ipcMain.handle('mediaAcquisition:getAgentSandbox', (_event, runId: string) => getMediaAcquisitionAgentSandbox(runId))
-    ipcMain.handle('mediaAcquisition:saveAgentSandbox', (_event, runId: string, state: Record<string, unknown>) => saveMediaAcquisitionAgentSandbox(runId, state))
-    ipcMain.handle('mediaAcquisition:cancel', (_event, runId: string) => cancelMediaAcquisitionRun(runId))
-    ipcMain.handle('mediaAcquisition:forceCancel', (_event, runId: string) => forceCancelMediaAcquisitionRun(runId))
-    ipcMain.handle('mediaAcquisition:beginSearch', (_event, runId: string) => beginMediaAcquisitionSearch(runId))
-    ipcMain.handle('mediaAcquisition:finishSearchWithoutCandidates', (_event, runId: string) => finishMediaAcquisitionSearchWithoutCandidates(runId))
-    ipcMain.handle('mediaAcquisition:retrySearch', (_event, runId: string, message: string, delayMs: number, maxRetries?: number) => retryMediaAcquisitionSearch(runId, message, delayMs, maxRetries))
-    ipcMain.handle('mediaAcquisition:addCandidate', (_event, runId: string, input: CreateMediaAcquisitionCandidateInput) => addMediaAcquisitionCandidate(runId, input))
-    ipcMain.handle('mediaAcquisition:submitProviderTransfer', (_event, data: { runId: string; candidateId: string; parentId: string; ticket?: MediaAcquisitionTransferTicket | null }) => submitMediaAcquisitionProviderTransfer(data.runId, data.candidateId, data.parentId, data.ticket))
-    ipcMain.handle('mediaAcquisition:submitProviderShareImport', (_event, data: { runId: string; candidateId: string; parentId: string; ticket?: MediaAcquisitionTransferTicket | null }) => submitMediaAcquisitionProviderShareImport(data.runId, data.candidateId, data.parentId, data.ticket))
-    ipcMain.handle('mediaAcquisition:submitExternalUrl', (_event, data: { runId: string; parentId: string; url: string; fileName: string }) => submitMediaAcquisitionExternalUrl(data.runId, data.parentId, data.url, data.fileName))
-    ipcMain.handle('mediaAcquisition:getProviderTransferStatus', (_event, data: { runId: string; taskId?: string; fileId?: string }) => getMediaAcquisitionProviderTransferStatus(data.runId, data.taskId, data.fileId))
-    ipcMain.handle('mediaAcquisition:recordCandidateBaseline', (_event, runId: string, candidateId: string, files: MediaAcquisitionFileSnapshot[]) => recordMediaAcquisitionCandidateBaseline(runId, candidateId, files))
-    ipcMain.handle('mediaAcquisition:getCandidateBaseline', (_event, runId: string, candidateId: string) => getMediaAcquisitionCandidateBaseline(runId, candidateId))
-    ipcMain.handle('mediaAcquisition:markCandidateTransferring', (_event, runId: string, candidateId: string) => markMediaAcquisitionCandidateTransferring(runId, candidateId))
-    ipcMain.handle('mediaAcquisition:recordTransferIntent', (_event, runId: string, candidateId: string, activity: string) => recordMediaAcquisitionTransferIntent(runId, candidateId, activity))
-    ipcMain.handle('mediaAcquisition:selectCandidate', (_event, runId: string, candidateId: string, reason: string) => selectMediaAcquisitionCandidate(runId, candidateId, reason))
-    ipcMain.handle('mediaAcquisition:recordExternalTask', (_event, runId: string, candidateId: string, taskId?: string, fileId?: string, activity?: string) => recordMediaAcquisitionExternalTask(runId, candidateId, taskId, fileId, activity || '已提交网盘任务，等待完成'))
-    ipcMain.handle('mediaAcquisition:updateExternalTask', (_event, runId: string, candidateId: string, progress: number, activity: string) => updateMediaAcquisitionExternalTaskProgress(runId, candidateId, progress, activity))
-    ipcMain.handle('mediaAcquisition:retryCandidate', (_event, runId: string, candidateId: string, message: string, delayMs?: number) => retryMediaAcquisitionCandidate(runId, candidateId, message, delayMs))
-    ipcMain.handle('mediaAcquisition:noCoverage', (_event, runId: string, reason: string) => markMediaAcquisitionNoCoverage(runId, reason))
-    ipcMain.handle('mediaAcquisition:failRun', (_event, runId: string, message: string) => failMediaAcquisitionRun(runId, message))
-    ipcMain.handle('mediaAcquisition:beginCandidateVerification', (_event, runId: string, candidateId: string, activity: string) => beginMediaAcquisitionCandidateVerification(runId, candidateId, activity))
-    ipcMain.handle('mediaAcquisition:beginOrganizing', (_event, runId: string, activity?: string) => beginMediaAcquisitionOrganizing(runId, activity))
-    ipcMain.handle('mediaAcquisition:completeCandidate', (_event, runId: string, candidateId: string, message: string) => completeMediaAcquisitionCandidate(runId, candidateId, message))
-    ipcMain.handle('mediaAcquisition:completeRun', (_event, runId: string, message: string, data?: Record<string, unknown>) => completeMediaAcquisitionRun(runId, message, data))
-    ipcMain.handle('mediaAcquisition:partialCandidate', (_event, runId: string, candidateId: string, message: string) => partialMediaAcquisitionCandidate(runId, candidateId, message))
-    ipcMain.handle('mediaAcquisition:continueAfterPartial', (_event, runId: string, candidateId: string, seasonTargets: Array<{ seasonNumber: number; missingEpisodes: number[] }>, message: string) => continueMediaAcquisitionAfterPartial(runId, candidateId, seasonTargets, message))
-    ipcMain.handle('mediaAcquisition:failCandidate', (_event, runId: string, candidateId: string, message: string, continueWithAlternatives?: boolean) => failMediaAcquisitionCandidate(runId, candidateId, message, continueWithAlternatives))
-    ipcMain.handle('mediaAcquisition:addEvent', (_event, runId: string, level: MediaAcquisitionEvent['level'], phase: MediaAcquisitionPhase, message: string, data?: Record<string, unknown>) => addMediaAcquisitionEvent(runId, level, phase, message, data))
-    ipcMain.handle('mediaAcquisition:assrtSearch', (_event, data: { token?: string; query?: string }) => searchAssrtSubtitles(data?.token, data?.query))
-    ipcMain.handle('mediaAcquisition:assrtDetail', (_event, data: { token?: string; subtitleId?: number }) => getAssrtSubtitleFiles(data?.token, data?.subtitleId))
+    registerMediaryIpc()
     ipcMain.handle('workspaceAgent:create', (_event, input: CreateWorkspaceTaskInput) => createWorkspaceTask(input))
     ipcMain.handle('workspaceAgent:list', (_event, limit?: number, includeArchived?: boolean) => listWorkspaceTasks(limit, includeArchived))
     ipcMain.handle('workspaceAgent:get', (_event, taskId: string) => getWorkspaceTask(taskId))
@@ -317,8 +272,6 @@ export default class ipcEvent {
     ipcMain.handle('agentV1:aiSearch:finishAudit', (_event, sessionId: string, runId: string, status?: 'completed' | 'failed' | 'cancelled', message?: string) => finishAiSearchV1Audit(sessionId, runId, status, message))
     ipcMain.handle('agentV1:aiSearch:collectStorageStats', (_event, workflowId: string) => collectAiSearchStorageStats(workflowId))
     ipcMain.handle('agentV1:aiSearch:confirmWrite', (_event, input: import('../aiSearch/AiSearchV1Bridge').ConfirmAiSearchV1WriteInput) => confirmAiSearchV1Write(input))
-    ipcMain.handle('agentV1:media:beginTransfer', (_event, runId: string, candidateId: string, reason: string) => beginMediaAcquisitionV1Transfer(runId, candidateId, reason))
-    ipcMain.handle('agentV1:media:completeTransfer', (_event, ticket: MediaAcquisitionTransferTicket, success: boolean, message: string) => completeMediaAcquisitionV1Transfer(ticket, success, message))
     ipcMain.handle('agentV1:document:beginAudit', (_event, input: { sessionId: string; runId: string; goal: string; sources: DocumentAgentV1Source[] }) => beginDocumentV1Audit(input))
     ipcMain.handle('agentV1:document:recordCitation', (_event, workflowId: string, input: { sourceId: string; location: string }) => recordDocumentV1Citation(workflowId, input))
     ipcMain.handle('agentV1:document:finishAudit', (_event, workflowId: string, status: 'completed' | 'failed' | 'cancelled', message: string) => finishDocumentV1Audit(workflowId, status, message))
@@ -1057,9 +1010,15 @@ export default class ipcEvent {
   }
 
   private static lyricWin: BrowserWindow | null = null
+  private static latestLyricData: Record<string, unknown> | null = null
   private static globalHotkeyAccelerators: string[] = []
 
   private static handleWebOpenLyric() {
+    ipcMain.on('WebLyricReady', (event) => {
+      if (ipcEvent.lyricWin?.webContents === event.sender && ipcEvent.latestLyricData) {
+        ipcEvent.sendLyricSnapshot(ipcEvent.latestLyricData)
+      }
+    })
     ipcMain.on('WebOpenLyric', () => {
       if (ipcEvent.lyricWin && !ipcEvent.lyricWin.isDestroyed()) {
         ipcEvent.lyricWin.show()
@@ -1088,7 +1047,7 @@ export default class ipcEvent {
       win.removeMenu()
       win.setAlwaysOnTop(true, 'screen-saver')
       if (!app.isPackaged && process.env.VITE_DEV_SERVER_URL) win.loadURL(process.env.VITE_DEV_SERVER_URL + '/desktop-lyrics.html')
-      else win.loadFile(getStaticPath('desktop-lyrics.html'))
+      else win.loadFile(getAsarPath('dist/desktop-lyrics.html'))
       win.on('ready-to-show', () => win.show())
       win.on('closed', () => {
         ipcEvent.lyricWin = null
@@ -1099,10 +1058,16 @@ export default class ipcEvent {
 
   private static handleWebSendLyric() {
     ipcMain.on('WebSendLyric', (_event, data) => {
+      ipcEvent.latestLyricData = data
+      ipcEvent.sendLyricSnapshot(data)
+    })
+  }
+
+  private static sendLyricSnapshot(data: Record<string, unknown>) {
       if (!ipcEvent.lyricWin || ipcEvent.lyricWin.isDestroyed()) return
       if (data?.clickThrough !== undefined) ipcEvent.lyricWin.setIgnoreMouseEvents(!!data.clickThrough, { forward: true })
       ipcEvent.lyricWin.webContents.send('lyricData', data)
-    })
+      ipcEvent.lyricWin.webContents.send('lyricConfig', { ...data, isLocked: !!data.locked })
   }
 
   private static handleWebCloseLyric() {

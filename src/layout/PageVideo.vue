@@ -6,7 +6,9 @@ import type { MediaLibraryItem } from '../types/media'
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Button, Input, Modal, Option as AOption, Select } from '@arco-design/web-vue'
 import Artplayer from 'artplayer'
+import { SeekThumbnailPreview } from '../utils/seekThumbnailPreview'
 import HlsJs from 'hls.js'
+import mpegts from 'mpegts.js'
 import * as dashjs from 'dashjs'
 import AliFile from '../aliapi/file'
 import DriveFile from '../drive/file'
@@ -55,7 +57,7 @@ import { updateSettingPreservingActivePanel } from '../utils/artplayerSetting'
 import message from '../utils/message'
 import { captureVideoQualitySwitchPlaybackState } from '../utils/videoQualitySwitch'
 import { hasPlaybackHeaders, mergeMpvPlaybackHeaders, mergePlaybackHeaders, resolveMpvPlaybackTransport } from '../utils/playbackHeaders'
-import { getLocalVideoProgress, saveLocalVideoProgress } from '../utils/videoProgress'
+import { directVideoPosition, getLocalVideoProgress, saveDirectVideoProgress, saveLocalVideoProgress } from '../utils/videoProgress'
 import { isVideoFile } from '../utils/videoFile'
 import { simpleToTradition, traditionToSimple } from 'chinese-simple2traditional'
 import path from 'path'
@@ -63,10 +65,13 @@ import UserDAL from '../user/userdal'
 import Config from '../config'
 import { isBoxUser, isDropboxUser, isOneDriveUser, isQuarkUser } from '../aliapi/utils'
 import { listProviderItems } from '../drive/providerList'
+import { listAllCloud189Items } from '../cloud189/adapter'
 import { resolveDriveProvider } from '../utils/driveProvider'
 import { getWebDavConnection, getWebDavConnectionId, isWebDavDrive, listWebDavDirectory } from '../utils/webdavClient'
 import useMediaServerRegistryStore from '../store/mediaServerRegistry'
 import MpvEmbeddedSurface from '../components/MpvEmbeddedSurface.vue'
+import PlaybackDanmakuSettings from '../components/PlaybackDanmakuSettings.vue'
+import { prepareDanmakuComments, danmakuMatchTitle } from '../utils/danmakuPreferences'
 import { t, useLocale } from '../i18n'
 import {
   getMediaServerItemDetail,
@@ -95,6 +100,10 @@ const appStore = useAppStore()
 const mediaStore = useMediaLibraryStore()
 const mediaServerRegistry = useMediaServerRegistryStore()
 const pageVideo = appStore.pageVideo!
+const storedVideoPosition = () => pageVideo.direct_file_playback
+  ? directVideoPosition(pageVideo)
+  : getLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id)
+
 const locale = useLocale()
 const isTop = ref(false)
 let autoPlayNumber = 0
@@ -205,7 +214,8 @@ const options: Option = {
   customType: {
     m3u8: (video: HTMLMediaElement, url: string, art: Artplayer) => playByHls(video, url, art),
     ts: (video: HTMLMediaElement, url: string, art: Artplayer) => playByHls(video, url, art),
-    mpd: (video: HTMLMediaElement, url: string, art: Artplayer) => playByDash(video, url, art)
+    mpd: (video: HTMLMediaElement, url: string, art: Artplayer) => playByDash(video, url, art),
+    flv: (video: HTMLMediaElement, url: string, art: Artplayer) => playByFlv(video, url, art)
   }
 }
 
@@ -339,7 +349,41 @@ const sendMediaServerStopReport = async (positionSeconds = 0) => {
   }
 }
 
+const flvPlayers = new WeakMap<Artplayer, ReturnType<typeof mpegts.createPlayer>>()
+const flvDestroyBound = new WeakSet<Artplayer>()
+
+const destroyArtFlv = (art: Artplayer) => {
+  const player = flvPlayers.get(art)
+  if (!player) return
+  flvPlayers.delete(art)
+  player.destroy()
+}
+
+const playByFlv = (video: HTMLMediaElement, url: string, art: Artplayer) => {
+  destroyArtHls(art)
+  destroyArtDash(art)
+  destroyArtFlv(art)
+  if (!mpegts.isSupported()) {
+    art.notice.show = t('video.unsupportedFormat')
+    return
+  }
+  const player = mpegts.createPlayer({ type: 'flv', url, isLive: false }, { enableWorker: false })
+  flvPlayers.set(art, player)
+  player.on(mpegts.Events.ERROR, () => {
+    if (flvPlayers.get(art) !== player) return
+    art.notice.show = t('video.unsupportedFormat')
+    art.emit('video:error')
+  })
+  if (!flvDestroyBound.has(art)) {
+    flvDestroyBound.add(art)
+    art.on('destroy', () => destroyArtFlv(art))
+  }
+  player.attachMediaElement(video)
+  player.load()
+}
+
 const playByHls = (video: HTMLMediaElement, url: string, art: Artplayer) => {
+  destroyArtFlv(art)
   if (HlsJs.isSupported()) {
     // @ts-ignore
     if (art.hls) art.hls.destroy()
@@ -387,6 +431,7 @@ const playByHls = (video: HTMLMediaElement, url: string, art: Artplayer) => {
 }
 
 const playByDash = (video: HTMLMediaElement, url: string, art: Artplayer) => {
+  destroyArtFlv(art)
   if (!dashjs.supportsMediaSource()) {
     art.notice.show = t('video.unsupportedFormatMpd')
     return
@@ -412,10 +457,15 @@ const getArtVideoType = (url: string, type?: string) => {
   if (normalizedType === 'hls' || normalizedType === 'm3u8') return 'm3u8'
   if (normalizedType === 'dash' || normalizedType === 'mpd') return 'mpd'
   if (normalizedType === 'ts') return 'ts'
+  if (normalizedType === 'flv') return 'flv'
   const pathname = url.split('?')[0].split('#')[0].toLowerCase()
   if (pathname.endsWith('.m3u8')) return 'm3u8'
   if (pathname.endsWith('.ts')) return 'ts'
   if (pathname.endsWith('.mpd')) return 'mpd'
+  if (pathname.endsWith('.flv')) return 'flv'
+  // Signed/proxied original URLs often have no extension. Do not apply the
+  // filename fallback to a provider's explicitly typed transcode stream.
+  if (!normalizedType && !/\.(mp4|m4v|mov|webm|mkv)$/i.test(pathname) && /\.flv$/i.test(pageVideo.file_name || '')) return 'flv'
   return ''
 }
 
@@ -466,6 +516,7 @@ const setArtVideoUrl = (art: Artplayer, url: string, type?: string) => {
   art.type = artType as any
   if (!isHlsVideoType(artType)) destroyArtHls(art)
   if (!isDashVideoType(artType)) destroyArtDash(art)
+  if (artType !== 'flv') destroyArtFlv(art)
   art.url = url
   scheduleCleanupInactiveStreamingControls(art)
 }
@@ -475,10 +526,14 @@ const getHlsControlPlugin = (art: Artplayer) => {
 }
 
 const safeRemoveArtControl = (art: Artplayer, name: string) => {
+  const controls = art.controls as typeof art.controls & { cache?: Map<string, unknown> }
+  // Artplayer throws on an absent entry. First play and single-quality sources
+  // legitimately have no quality control to remove.
+  if (controls.cache?.has(name) === false) return
   try {
-    art.controls.remove(name)
+    controls.remove(name)
   } catch (error) {
-    if ((art.controls as any).cache?.has?.(name)) console.warn(`移除播放器控件失败: ${name}`, error)
+    if (controls.cache?.has(name)) console.warn(`移除播放器控件失败: ${name}`, error)
   }
 }
 
@@ -715,10 +770,7 @@ const renderMediaSearchControl = (art: Artplayer) => {
         html: t('video.subtitleSearch'),
         type: 'subtitle'
       },
-      {
-        html: t('video.danmakuSearch'),
-        type: 'danmaku'
-      }
+      ...(useSettingStore().danmakuEnabled ? [{ html: t('video.danmakuSearch'), type: 'danmaku' }] : [])
     ],
     onSelect: (selector: any) => {
       const item = selector as { type: string }
@@ -937,6 +989,20 @@ const renderMediaServerControls = (art: Artplayer) => {
     removeMediaServerControl(art, 'mediaServerSubtitle')
   }
   renderMediaSearchControl(art)
+  if (useSettingStore().danmakuEnabled) art.controls.add({
+    name: 'playbackDanmakuSettings', position: 'right', index: 22, html: '弹幕设置',
+    click: () => {
+      Modal.open({ title: '弹幕设置', width: 460, footer: false,
+        content: () => h(PlaybackDanmakuSettings, { onChange: () => {
+          applyDanmakuPluginConfig(art)
+          const plugin = getDanmakuPlugin(art)
+          if (useSettingStore().danmakuVisible) plugin?.show?.(); else plugin?.hide?.()
+          const raw = rawPlaybackDanmaku.get(art)
+          if (raw) void loadDanmakuToPlayer(art, raw, false)
+        } })
+      })
+    }
+  } as any)
 }
 
 const refreshMediaServerPlayList = async (art: Artplayer, itemId?: string) => {
@@ -1109,7 +1175,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown, true)
   pageVideo.play_cursor = Math.max(
     Number(pageVideo.play_cursor || 0),
-    getLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id)
+    storedVideoPosition()
   )
   const name = pageVideo.file_name || t('video.onlinePreview')
   document.body.setAttribute('arco-theme', 'dark')
@@ -1143,6 +1209,11 @@ const createVideo = async (name: string) => {
   Artplayer.LOG_VERSION = false
   Artplayer.PLAYBACK_RATE = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4]
   ArtPlayerRef = new Artplayer(options)
+  const previewPlayer = ArtPlayerRef
+  const thumbnailPreview = new SeekThumbnailPreview(previewPlayer.template.$progress,
+    () => ({ url: previewPlayer.url, duration: previewPlayer.duration }))
+  previewPlayer.on('destroy', () => thumbnailPreview.dispose())
+  previewPlayer.on('video:loadstart', () => thumbnailPreview.hide())
   // 获取用户配置
   initStorage(ArtPlayerRef)
   initEvent(ArtPlayerRef)
@@ -1245,6 +1316,7 @@ const initEvent = (art: Artplayer) => {
   })
   // 视频播放完毕
   art.on('video:ended', async () => {
+    if (pageVideo.direct_file_playback) saveDirectVideoProgress(pageVideo, 0, 0, true)
     if (pageVideo.playlist_loop && playList.length === 1) { art.seek = 0; await art.play(); return }
     if (pageVideo.drive_id === 'media_server') {
       await sendMediaServerStopReport(art.currentTime || 0)
@@ -1371,7 +1443,9 @@ const getDirFileList = async (dir_id: string, hasDir: boolean, category: string 
     } else {
       const route = resolveDriveProvider(pageVideo.user_id, pageVideo.drive_id, pageVideo.tokenfrom || UserDAL.GetUserToken(pageVideo.user_id)?.tokenfrom)
       const providerResult = route.isValid && route.provider !== 'aliyun'
-        ? await listProviderItems(route.provider, pageVideo.user_id, pageVideo.drive_id, dir_id, true)
+        ? route.provider === '189'
+          ? { items: await listAllCloud189Items(pageVideo.user_id, pageVideo.drive_id, dir_id) }
+          : await listProviderItems(route.provider, pageVideo.user_id, pageVideo.drive_id, dir_id, true)
         : undefined
       if (providerResult) {
         items = providerResult.items
@@ -1434,8 +1508,8 @@ const getSubtitleFileList = async (includeSubfolders = false): Promise<selectorI
 const refreshSetting = async (art: Artplayer, item: any) => {
   // 刷新文件
   pageVideo.html = item.html
-  pageVideo.play_cursor = item.play_cursor
-  pageVideo.file_name = item.html
+  pageVideo.play_cursor = pageVideo.direct_file_playback ? 0 : item.play_cursor
+  pageVideo.file_name = item.name || item.html
   pageVideo.file_id = item.file_id || ''
   if (item.user_id) pageVideo.user_id = item.user_id
   if (item.tokenfrom) pageVideo.tokenfrom = item.tokenfrom
@@ -1560,6 +1634,7 @@ const getDanmakuVideoKey = () => {
 }
 
 const getDanmakuApis = (): DanmakuApiConfig[] => {
+  if (!useSettingStore().danmakuEnabled) return []
   return useSettingStore().danmakuApis
     .filter((api) => api.name.trim() && api.url.trim())
     .map((api) => ({
@@ -1578,14 +1653,20 @@ const applyDanmakuPluginConfig = (art: Artplayer) => {
   plugin?.config?.(buildDanmakuPluginOption(useSettingStore()) as any)
 }
 
-const loadDanmakuToPlayer = async (art: Artplayer, danmus: Danmu[], tip = t('video.loadedDanmaku')) => {
+const rawPlaybackDanmaku = new WeakMap<Artplayer, Danmu[]>()
+
+const loadDanmakuToPlayer = async (art: Artplayer, danmus: Danmu[], tip: string | false = t('video.loadedDanmaku')) => {
+  if (!useSettingStore().danmakuEnabled) return
   const plugin = getDanmakuPlugin(art)
   if (!plugin) return
   applyDanmakuPluginConfig(art)
-  await plugin.load?.(danmus)
+  rawPlaybackDanmaku.set(art, danmus)
+  const preferences = useSettingStore()
+  await plugin.load?.(prepareDanmakuComments(danmus, preferences).map(item => ({ ...item, time: Math.max(0, (item.time || 0) + preferences.danmakuDelay),
+    style: { ...item.style, textShadow: `0 0 ${preferences.danmakuBorderSize}px #000, 0 0 ${preferences.danmakuBorderSize}px #000` } })))
   if (useSettingStore().danmakuVisible) plugin.show?.()
   else plugin.hide?.()
-  message.success(`${tip}（${danmus.length} 条）`)
+  if (tip) message.success(`${tip}（${danmus.length} 条）`)
 }
 
 const getJassubInstance = (art: Artplayer) => {
@@ -1666,13 +1747,15 @@ const switchSubtitleText = async (art: Artplayer, name: string, ext: string, dat
 }
 
 const autoLoadDanmaku = async (art: Artplayer) => {
+  const preferences = useSettingStore()
+  if (!preferences.danmakuEnabled || (preferences.danmakuSkipShort && art.duration > 0 && art.duration < 600)) return
   const videoKey = getDanmakuVideoKey()
   if (!videoKey || danmakuAutoLoadedKey === videoKey || danmakuAutoLoadingKey === videoKey) return
   const apis = getDanmakuApis()
   if (!apis.length) return
   danmakuAutoLoadingKey = videoKey
   try {
-    const match = await autoMatchDanmaku(getVideoDanmakuTitle(), apis)
+    const match = await autoMatchDanmaku(danmakuMatchTitle(getVideoDanmakuTitle(), preferences.danmakuMatchYear), apis)
     const firstMatch = match?.response.matches?.[0]
     if (!match || !firstMatch) throw new Error('no danmaku match')
     const danmus = await loadDanmakuComments(firstMatch.episodeId, match.api)
@@ -1728,7 +1811,7 @@ const openDanmakuSearchModal = (art: Artplayer) => {
     return
   }
 
-  const keyword = ref(getVideoDanmakuTitle())
+  const keyword = ref(useSettingStore().danmakuSearchHistory && useSettingStore().danmakuLastQuery || getVideoDanmakuTitle())
   const apiId = ref(apis[0].id)
   const loading = ref(false)
   const animes = ref<DanmakuSearchAnime[]>([])
@@ -1786,6 +1869,7 @@ const openDanmakuSearchModal = (art: Artplayer) => {
     selectedAnimeMeta.value = ''
     viewMode.value = 'search'
     try {
+      if (useSettingStore().danmakuSearchHistory) useSettingStore().updateStore({danmakuLastQuery: keyword.value})
       animes.value = await searchAnime(keyword.value, api)
       if (!animes.value.length) message.warning(t('video.noDanmakuFound'))
     } catch (error: any) {
@@ -2265,7 +2349,7 @@ const loadPlugins = async (art: Artplayer) => {
     chapters: []
   }))
   // 弹幕插件
-  art.plugins.add(artplayerPluginDanmuku({
+  if (useSettingStore().danmakuEnabled) art.plugins.add(artplayerPluginDanmuku({
     ...buildDanmakuPluginOption(useSettingStore()),
     danmuku: []
   } as any))
@@ -2442,7 +2526,7 @@ const loadMpvEmbeddedCurrentVideo = async (resumePosition = pageVideo.play_curso
   ++mpvSubtitleDiscovery
   mpvEmbeddedSubtitleFiles.value = []
   mpvEmbeddedSubtitleSources.value = []
-  const storedProgress = getLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id)
+  const storedProgress = storedVideoPosition()
   resumePosition = Math.max(Number(resumePosition) || 0, storedProgress)
   pageVideo.play_cursor = Math.max(Number(pageVideo.play_cursor) || 0, storedProgress)
   const source = await resolvePageVideoMpvSource()
@@ -2488,11 +2572,11 @@ const handleMpvEmbeddedQualitySelect = async (quality: string) => {
     Number(status?.status?.position || 0),
     Number(mpvEmbeddedStatus.value?.position || 0),
     Number(pageVideo.play_cursor || 0),
-    getLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id)
+    storedVideoPosition()
   )
   pageVideo.play_cursor = Number.isFinite(position) && position > 0 ? Math.floor(position) : 0
   const resumePosition = pageVideo.play_cursor
-  saveLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id, pageVideo.play_cursor)
+  if (!pageVideo.direct_file_playback) saveLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id, pageVideo.play_cursor)
   console.info('[播放][MPV] 切换清晰度前保存进度', {
     quality,
     position: pageVideo.play_cursor,
@@ -2504,7 +2588,7 @@ const handleMpvEmbeddedQualitySelect = async (quality: string) => {
 
 const applyPlaylistItemToPageVideo = (item: selectorItem) => {
   pageVideo.html = item.html
-  pageVideo.play_cursor = item.play_cursor || 0
+  pageVideo.play_cursor = pageVideo.direct_file_playback ? 0 : item.play_cursor || 0
   pageVideo.file_name = item.name || item.html
   pageVideo.file_id = item.file_id || ''
   if (item.user_id) pageVideo.user_id = item.user_id
@@ -2606,6 +2690,10 @@ const getVideoInfo = async (art: Artplayer) => {
   if (pageVideo.drive_id === 'local') {
     const urlModule = window.require?.('url')
     const filePath = pageVideo.file_id || (pageVideo as any).file_path || ''
+    if (!filePath) {
+      art.notice.show = t('video.localVideoPathEmpty')
+      return
+    }
     if (filePath) {
       const fileUrl = urlModule?.pathToFileURL ? urlModule.pathToFileURL(filePath).href : `file://${encodeURI(filePath)}`
       setArtVideoUrl(art, fileUrl)
@@ -2632,6 +2720,8 @@ const getVideoInfo = async (art: Artplayer) => {
     renderMediaServerControls(art)
     return
   }
+  // Do not retain a previous video's quality control while querying this source.
+  safeRemoveArtControl(art, 'quality')
   // 获取视频链接
   const data: string | IRawUrl = await getRawUrl(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id, pageVideo.encType, pageVideo.password, false, 'video', '', 'thirdParty', pageVideo.tokenfrom)
   if (typeof data != 'string' && data.qualities.length > 0) {
@@ -2648,12 +2738,12 @@ const getVideoInfo = async (art: Artplayer) => {
     setArtVideoUrl(art, defaultUrl, defaultQuality.type)
     defaultQuality.default = true
     pageVideo.expire_time = GetExpiresTime(defaultQuality.url)
-    art.controls.update({
+    if (data.qualities.length > 1) art.controls.update({
       name: 'quality',
       index: 20,
       position: 'right',
       style: { marginRight: '15px' },
-      html: defaultQuality ? defaultQuality.html : '',
+      html: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-label="清晰度"><rect x="2" y="5" width="15" height="14" rx="3"/><path d="m17 10 5-3v10l-5-3M6 14l6-6M7 8h5v5"/></svg>',
       selector: data.qualities,
       onSelect: (selector: any, element: HTMLElement, event: Event) => {
         const item = selector as selectorItem
@@ -2662,6 +2752,7 @@ const getVideoInfo = async (art: Artplayer) => {
         art.type = artType as any
         if (!isHlsVideoType(artType)) destroyArtHls(art)
         if (!isDashVideoType(artType)) destroyArtDash(art)
+        if (artType !== 'flv') destroyArtFlv(art)
         const itemHeaders = mergePlaybackHeaders(data.headers, item.headers)
         const itemUrl = resolveHeaderAwareVideoUrl(item.url, itemHeaders, data.size, item.quality || '')
         console.info('[播放][网页] 切换清晰度链接', {
@@ -2709,7 +2800,7 @@ const getVideoInfo = async (art: Artplayer) => {
           art.off('video:error', handleQualityError)
           console.error('[播放][网页] 切换播放链接失败', { quality: item.quality || '', url: itemUrl, error })
         })
-        return item.html
+        return '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-label="清晰度"><rect x="2" y="5" width="15" height="14" rx="3"/><path d="m17 10 5-3v10l-5-3M6 14l6-6M7 8h5v5"/></svg>'
       }
     })
     // 内嵌字幕
@@ -2931,7 +3022,9 @@ const getVideoCursor = async (art: Artplayer, play_cursor?: number) => {
   if (art.storage.get('autoJumpCursor')) {
     let cursor = 0
     // 进度
-    if (play_cursor) {
+    if (pageVideo.direct_file_playback) {
+      cursor = storedVideoPosition()
+    } else if (play_cursor) {
       cursor = play_cursor
     } else {
       const info = await PlayerUtils.getPlayCursor(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id)
@@ -2944,7 +3037,7 @@ const getVideoCursor = async (art: Artplayer, play_cursor?: number) => {
         }
       }
     }
-    cursor = Math.max(cursor, getLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id))
+    cursor = Math.max(cursor, storedVideoPosition())
     // 防止无效跳转
     if (cursor >= art.duration) {
       cursor = art.duration - 60
@@ -3299,7 +3392,7 @@ const getSubTitleList = async (art: Artplayer, autoLoad = true) => {
           await switchSubtitleText(art, onlineSubData.name, onlineSubData.ext, data)
           art.notice.show = tips
         }
-        return item.html
+        return '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-label="清晰度"><rect x="2" y="5" width="15" height="14" rx="3"/><path d="m17 10 5-3v10l-5-3M6 14l6-6M7 8h5v5"/></svg>'
       }
     }, {
       html: t('video.importLocalSubtitle'),
@@ -3329,11 +3422,11 @@ const getSubTitleList = async (art: Artplayer, autoLoad = true) => {
           if (subDefault.file_id) await loadOnlineSub(art, subDefault)
           else if (subDefault.url) await loadSubtitleUrlToPlayer(art, subDefault)
           art.notice.show = t('video.dualSubtitle') + t('video.off')
-          return item.html
+          return '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-label="清晰度"><rect x="2" y="5" width="15" height="14" rx="3"/><path d="m17 10 5-3v10l-5-3M6 14l6-6M7 8h5v5"/></svg>'
         }
         const ok = await applyMultipleSubtitles(art, multipleSubtitleCandidates.slice(0, 2), item.mode === 'reverse')
         if (ok && item.$parent) item.$parent.tooltip = item.mode === 'reverse' ? t('video.reverse') : t('video.on')
-        return item.html
+        return '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-label="清晰度"><rect x="2" y="5" width="15" height="14" rx="3"/><path d="m17 10 5-3v10l-5-3M6 14l6-6M7 8h5v5"/></svg>'
       }
     }] : []), {
       html: t('video.subtitleOffset'),
@@ -3382,6 +3475,10 @@ const getSubTitleList = async (art: Artplayer, autoLoad = true) => {
 
 const updateVideoTime = async (positionSeconds = ArtPlayerRef?.currentTime || 0, durationSeconds = ArtPlayerRef?.duration || 0) => {
   if (pageVideo.drive_id === 'media_server') return
+  if (pageVideo.direct_file_playback) {
+    saveDirectVideoProgress(pageVideo, positionSeconds, durationSeconds)
+    return
+  }
   updateContinueWatching(positionSeconds, durationSeconds)
   if (isQuarkUser(pageVideo.user_id) || pageVideo.drive_id === 'quark') return
   await AliFile.ApiUpdateVideoTime(
@@ -3405,7 +3502,7 @@ const persistVideoProgress = async (positionSeconds: number, durationSeconds: nu
     lastVideoProgressSaveSecond = -1
   }
   const second = Math.floor(position)
-  saveLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id, position)
+  if (!pageVideo.direct_file_playback) saveLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id, position)
   if (!force && second < 10) return
   if (!force && second === lastVideoProgressSaveSecond) return
   lastVideoProgressSaveSecond = second
@@ -3523,7 +3620,11 @@ onBeforeUnmount(() => {
   } else if (ArtPlayerRef?.currentTime > 0) {
     // BrowserWindow may be closed by the system window button without going
     // through handleHideClick. Keep the shared progress synchronous.
-    saveLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id, ArtPlayerRef.currentTime)
+    if (pageVideo.direct_file_playback) {
+      saveDirectVideoProgress(pageVideo, ArtPlayerRef.currentTime, ArtPlayerRef.duration, ArtPlayerRef.video.ended)
+    } else {
+      saveLocalVideoProgress(pageVideo.user_id, pageVideo.drive_id, pageVideo.file_id, ArtPlayerRef.currentTime)
+    }
   }
   if (onlineSubData.dataUrl) {
     URL.revokeObjectURL(onlineSubData.dataUrl)

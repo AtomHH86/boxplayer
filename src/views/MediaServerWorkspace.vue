@@ -1400,6 +1400,7 @@
 </template>
 
 <script setup lang="ts">
+import { openVideoPage } from '../utils/videoPlayback'
 import { generalPreferences, displayScopeAllows } from '../utils/seriesVersionPreferences'
 import MediaPosterPlaceholder from '../components/MediaPosterPlaceholder.vue'
 import MediaLoadingIndicator from '../components/MediaLoadingIndicator.vue'
@@ -2681,7 +2682,7 @@ const openMediaServerPlayback = async (
     settingStore.uiMediaServerCustomDeviceProfile,
     settingStore.uiMediaServerBitrateTestSize
   )
-  window.WebOpenWindow?.({
+  void openVideoPage({
     page: 'PageVideo',
     theme: 'dark',
     data: {
@@ -2695,7 +2696,7 @@ const openMediaServerPlayback = async (
       encType: '',
       password: '',
       expire_time: 0,
-      play_cursor: playback.playCursorSeconds || 0,
+      play_cursor: playback.playCursorSeconds || ('playbackPositionTicks' in item ? Math.max(0, (item.playbackPositionTicks || 0) / 10_000_000) : 0),
       media_url: playback.url,
       media_headers: playback.headers,
       media_subtitle_sources: playback.subtitleSources || [],
@@ -2879,6 +2880,21 @@ const resolveHomePlaybackTarget = async (server: MediaServerConfig, item: MediaS
       item: episodes[0],
       playlistLabel: item.title,
       episodePlaylist: episodes.map((episode) => ({ id: episode.id, title: episode.title }))
+    }
+  }
+
+  if (item.kind === 'episode') {
+    const detail = await content.loadItemDetail(server, item.id)
+    const seriesId = detail.seriesId || item.seriesId
+    if (seriesId) {
+      const episodes = (await loadAllMediaServerChildren(server, seriesId, true))
+        .filter(child => child.kind === 'episode')
+        .sort(compareEpisodeItems)
+      return {
+        item: { ...item, ...detail },
+        playlistLabel: detail.seriesTitle || item.seriesTitle || item.parentTitle || '',
+        episodePlaylist: episodes.map(episode => ({ id: episode.id, title: episode.title }))
+      }
     }
   }
 
@@ -3303,6 +3319,29 @@ const handleDetailAction = async (action: 'watched' | 'favorite') => {
   }
 }
 
+const resolveDetailPlaybackPlaylist = async (
+  server: MediaServerConfig,
+  item: MediaServerItemDetail,
+  episodes: MediaServerLibraryNode[],
+  seasonTitle?: string
+) => {
+  const episodePlaylist = episodes.map((episode) => ({ id: episode.id, title: episode.title }))
+  const playlistLabel = seasonTitle || '当前季剧集'
+  if (item.kind !== 'episode' || episodePlaylist.length > 0) return { playlistLabel, episodePlaylist }
+
+  // Continue Watching can open an episode detail without a season panel.
+  // Reuse the episode route's series lookup so selecting Play still has siblings.
+  try {
+    const target = await resolveHomePlaybackTarget(server, item)
+    if (target.episodePlaylist.some((episode) => episode.id === item.id)) {
+      return { playlistLabel: target.playlistLabel || playlistLabel, episodePlaylist: target.episodePlaylist }
+    }
+  } catch (error) {
+    console.warn('媒体服务器选集列表加载失败', error)
+  }
+  return { playlistLabel, episodePlaylist }
+}
+
 const handleDetailPlay = async () => {
   const server = registry.currentServer
   const item = detailDisplayedItem.value
@@ -3330,7 +3369,7 @@ const handleDetailPlay = async () => {
         streamIndex: card.streamIndex as number,
         label: card.title
       }))
-    await openMediaServerPlayback(item, {
+    const options = {
       sourceId: selectedSourceOption.value?.id || detailSourceOptions.value[0]?.id || '',
       sourceLabel: selectedSourceOption.value?.title || detailSourceOptions.value[0]?.title || '',
       sourceOptions: detailSourceOptions.value.map((source) => ({
@@ -3346,13 +3385,13 @@ const handleDetailPlay = async () => {
       audioLabel: selectedAudioCard?.title || '',
       subtitleLabel: selectedSubtitleCard?.title || '',
       audioOptions,
-      subtitleOptions,
-      playlistLabel: detailSeasonTitle.value || '当前季剧集',
-      episodePlaylist: detailEpisodeItems.value.map((episode) => ({
-        id: episode.id,
-        title: episode.title
-      }))
-    })
+      subtitleOptions
+    }
+    const route = currentRoute.value
+    const playlist = await resolveDetailPlaybackPlaylist(server, item, detailEpisodeItems.value, detailSeasonTitle.value)
+    if (registry.currentServer?.id !== server.id || currentRoute.value !== route ||
+        detailDisplayedItem.value.id !== item.id) return
+    await openMediaServerPlayback(item, { ...options, ...playlist, server })
   } catch (error: any) {
     console.error('媒体服务器播放失败:', error)
     message.error(error?.message || '媒体服务器播放失败')
@@ -9735,4 +9774,18 @@ body:not([arco-theme='dark']) #xbybody .media-server-workspace .detail-backdrop-
 #xbybody .media-server-workspace .detail-play-row:not(.has-version) {
   grid-template-columns: minmax(0, 1fr);
 }
+</style>
+
+<style scoped>
+#xbybody .media-server-workspace .detail-primary-play.has-resume {
+  color: #111 !important;
+  background: rgba(160, 157, 164, .35) !important;
+  backdrop-filter: blur(16px);
+}
+#xbybody .media-server-workspace .detail-primary-play > .detail-play-progress {
+  background: #fff;
+  border-right: 0;
+}
+.detail-episode-progress { height: 3px; bottom: 8px; }
+.detail-episode-progress-bar { background: #fff; }
 </style>

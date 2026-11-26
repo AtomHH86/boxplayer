@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, watch, nextTick, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import { useAppStore } from '../store'
 import SettingPlay from './SettingPlay.vue'
 import SettingGeneral from './SettingGeneral.vue'
@@ -36,8 +36,8 @@ withDefaults(defineProps<{ sidebarVisible?: boolean }>(), { sidebarVisible: true
 
 const hideSetting = computed(() => appStore.appTab !== 'setting')
 const settingSearch = ref('')
-const settingSearchResults = ref<Array<{ label: string; element: HTMLElement }>>([])
-const settingSearchAnchor = ref<HTMLElement>()
+const settingSearchResults = shallowRef<Array<{ label: string; element: HTMLElement }>>([])
+const settingSearchAnchor = shallowRef<HTMLElement>()
 const settingSearchPopupStyle = ref<Record<string, string>>({})
 
 const matchesSettingSearch = (text: string, query: string) => {
@@ -147,7 +147,7 @@ onUnmounted(() => {
           <template #icon><IconFont name="iconlock" /></template>
           {{ t('settings.ai') }}
         </a-menu-item>
-        <a-menu-item key="SettingSecurity">
+        <a-menu-item key="SettingSecurity" data-testid="settings-security-menu">
           <template #icon><IconFont name="iconchrome" /></template>
           {{ t('settings.security') }}
         </a-menu-item>
@@ -207,8 +207,8 @@ onUnmounted(() => {
           {{ t('settings.logs') }}
         </a-menu-item>
       </a-menu>
+      <div class="settings-support-links"><h3>{{ t("settings.community") }}</h3><button type="button" @click="openExternal('https://discord.gg/BXwGcQA36X')"><img src="/community/discord.svg" width="20" height="20" alt="" /><span>BoxPlayer Discord</span><ExternalLink :size="14" /></button><button type="button" @click="openExternal('https://xhslink.cn/m/1hvKIte6Cly')"><img src="/community/xiaohongshu.svg" width="20" height="20" alt="" /><span>小红书</span><ExternalLink :size="14" /></button><button type="button" @click="openExternal('https://t.me/+ndIYfSmPvN4yOWE1')"><img src="/community/telegram.svg" width="20" height="20" alt="" /><span>Telegram</span><ExternalLink :size="14" /></button></div>
       <div class="settings-support-links">
-        <button type="button" @click="openExternal(SETTINGS_FOLLOW_URL)"><span>{{ t('supportLinks.supportFollow') }}</span><ExternalLink :size="14" /></button>
         <button type="button" @click="openExternal(SETTINGS_HELP_URL)"><span>{{ t('supportLinks.supportHelpCenter') }}</span><ExternalLink :size="14" /></button>
         <button type="button" @click="reportSettingsError"><span>{{ t('supportLinks.supportReportError') }}</span><ExternalLink :size="14" /></button>
       </div>

@@ -190,10 +190,18 @@ export const apiQuarkDownloadUrl = async (user_id: string, fileId: string): Prom
     return { url: '', size: 0, name: '', error: '未登录夸克网盘' }
   }
   if (typeof window !== 'undefined' && (window as any).WebQuarkDownloadUrl) {
-    const result = await (window as any).WebQuarkDownloadUrl({ fileId, cookie: token.access_token })
-    const data = result?.body ? JSON.parse(result.body) : undefined
+    let result: any
+    for (let attempt = 0; attempt < 3; attempt++) {
+      result = await (window as any).WebQuarkDownloadUrl({ fileId, cookie: token.access_token })
+      const status = Number(result?.status || 0)
+      const transient = !result?.ok && (status === 0 || [502, 503, 504].includes(status))
+      if (!transient || attempt === 2) break
+      await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)))
+    }
+    let data: any
+    try { data = result?.body ? JSON.parse(result.body) : undefined } catch { /* Gateways may return HTML instead of JSON. */ }
     if (!result?.ok || data?.status === 'error' || (data?.code && data.code !== 0)) {
-      const error = data?.message || result?.error || '获取夸克下载地址失败'
+      const error = data?.message || result?.error || (result?.status ? `获取夸克下载地址失败（HTTP ${result.status}）` : '获取夸克下载地址失败')
       message.error(error)
       return { url: '', size: 0, name: '', error }
     }
@@ -292,7 +300,8 @@ export const mapQuarkFileToAliModel = (item: QuarkFileItem, drive_id: string, pa
     __v_skip: true,
     drive_id,
     file_id: String(item.fid || ''),
-    parent_file_id: item.pdir_fid && item.pdir_fid !== '0' ? String(item.pdir_fid) : parentId,
+    parent_file_id: item.pdir_fid != null && String(item.pdir_fid) !== ''
+      ? (String(item.pdir_fid) === '0' ? 'quark_root' : String(item.pdir_fid)) : parentId,
     name,
     namesearch: HanToPin(name),
     ext,

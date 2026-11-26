@@ -97,6 +97,7 @@ export interface IPageVideoSubtitleFile {
 }
 
 export interface IPageVideo {
+  direct_file_playback?: boolean
   user_id: string
   tokenfrom?: string
   drive_id: string
@@ -136,6 +137,14 @@ export interface IPageVideo {
 }
 
 export interface IPageMusicTrack {
+  library_track_id?: string
+  local_tag_version?: number
+  head_tag_version?: number
+  title?: string
+  artist?: string
+  album?: string
+  lyric_text?: string
+  metadata_source?: string
   user_id: string
   tokenfrom?: string
   drive_id: string

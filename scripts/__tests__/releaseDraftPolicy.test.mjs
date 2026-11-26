@@ -3,7 +3,25 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 describe('human-owned release publication', () => {
+  it('keeps unpacked verification jobs from implicitly publishing on tags', () => {
+    for (const name of ['linux', 'windows-x64', 'macos-arm64', 'macos-x64']) {
+      const source = readFileSync(resolve(`.github/workflows/embedded-mpv-${name}.yml`), 'utf8')
+      const commands = source.split('\n').filter(line => line.includes('pnpm exec electron-builder') && line.includes('--dir'))
+      expect(commands.length).toBeGreaterThan(0)
+      for (const command of commands) expect(command).toContain('--publish never')
+    }
+  })
+
   const workflow = readFileSync(resolve('.github/workflows/release.yml'), 'utf8')
+  it('keeps Apple signing credentials out of Windows publisher metadata', () => {
+    const packaging = workflow.slice(workflow.indexOf('\n  release:'), workflow.indexOf('\n  finalize-release:'))
+    expect(packaging).toContain("CSC_LINK: ${{ matrix.os == 'macos-15' && secrets.CSC_LINK || '' }}")
+    expect(packaging).toContain("CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-15' && secrets.CSC_KEY_PASSWORD || '' }}")
+    expect(packaging).toContain("WIN_CSC_LINK: ${{ matrix.os == 'windows-latest' && secrets.WIN_CSC_LINK || '' }}")
+    expect(packaging).not.toContain('CSC_LINK: ${{ secrets.CSC_LINK }}')
+    const builder = JSON.parse(readFileSync(resolve('electron-builder.json'), 'utf8'))
+    expect(builder.win.verifyUpdateCodeSignature).not.toBe(false)
+  })
   it('keeps packaging and the final release update in draft state', () => {
     const builder = JSON.parse(readFileSync(resolve('electron-builder.json'), 'utf8'))
     for (const target of builder.publish) expect(target.releaseType).toBe('draft')
@@ -28,12 +46,12 @@ describe('human-owned release publication', () => {
   it('publishes both macOS architectures once using both verified runtimes', () => {
     const packaging = workflow.slice(workflow.indexOf('\n  release:'), workflow.indexOf('\n  finalize-release:'))
     const runners = packaging.match(/os: \[([^\]]+)\]/)[1].split(',').map(value => value.trim())
-    expect(runners.filter(value => value.startsWith('macos-'))).toEqual(['macos-14'])
+    expect(runners.filter(value => value.startsWith('macos-'))).toEqual(['macos-15'])
     for (const arch of ['x64', 'arm64']) {
       expect(packaging).toContain(`name: embedded-mpv-darwin-${arch}-candidate`)
       expect(packaging).toContain(`node scripts/check-embedded-mpv-bundles.mjs darwin/${arch}`)
     }
-    expect(packaging).toContain("args: ${{ matrix.os == 'macos-14' && '--x64 --arm64' || '' }}")
+    expect(packaging).toContain("args: ${{ matrix.os == 'macos-15' && '--x64 --arm64' || '' }}")
     expect(packaging).toContain('max_attempts: 3')
     // Native x64 playback remains a prerequisite even with a single publisher.
     expect(packaging).toContain('embedded-mpv-macos-x64-test')

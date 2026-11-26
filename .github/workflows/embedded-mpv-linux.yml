@@ -39,12 +39,15 @@ on:
     branches:
       - codex/mpv-runner-validation
 
+env:
+  GH_TOKEN: ${{ github.token }}
+
 jobs:
   linux:
     env:
       NODE_OPTIONS: --max-old-space-size=4096
-      BOXPLAYER_E2E_CLOUD123_ACCOUNT_JSON: ${{ secrets.BOXPLAYER_E2E_CLOUD123_ACCOUNT_JSON }}
       BOXPLAYER_E2E_QUARK_ACCOUNT_JSON: ${{ secrets.BOXPLAYER_E2E_QUARK_ACCOUNT_JSON }}
+      BOXPLAYER_E2E_BAIDU_ACCOUNT_JSON: ${{ secrets.BOXPLAYER_E2E_BAIDU_ACCOUNT_JSON }}
     strategy:
       fail-fast: false
       # OAuth providers may rotate refresh tokens. Never let the two Linux
@@ -79,7 +82,7 @@ jobs:
 
       - name: Install project dependencies
         run: |
-          pnpm install --frozen-lockfile
+          node scripts/install-ci-dependencies.mjs
           pnpm exec electron-rebuild -f -w better-sqlite3
           pnpm --dir native/boxplayer-mpv-texture install --ignore-workspace --no-frozen-lockfile --ignore-scripts
 
@@ -197,7 +200,7 @@ jobs:
 
       - name: Verify the unpacked Electron package contains the complete bundle
         run: |
-          pnpm exec electron-builder --linux --dir
+          pnpm exec electron-builder --linux --dir --publish never
           node scripts/check-packaged-mpv.mjs linux ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4

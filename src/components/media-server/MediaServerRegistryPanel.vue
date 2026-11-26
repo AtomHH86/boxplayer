@@ -343,11 +343,12 @@ import embyIcon from '../../assets/media-server/emby.svg'
 import plexIcon from '../../assets/media-server/plex.svg'
 import AddMediaServerModal from './AddMediaServerModal.vue'
 import PlexResourcesModal from './PlexResourcesModal.vue'
+import { isMediaServerAuthenticationRejected } from '../../media-server/adapters/base'
 import { fetchMediaServerLoginProfile, signInMediaServer } from '../../media-server/auth'
 import { createPlexServerConfigs, signInPlex, verifyPlexServerConfig } from '../../media-server/plexAuth'
 import { t } from '../../i18n'
 
-const props = defineProps<{ formOnly?: boolean; embedded?: boolean; defaultType?: MediaServerType }>()
+const props = defineProps<{ formOnly?: boolean; embedded?: boolean; defaultType?: MediaServerType; editServerId?: string }>()
 const registry = useMediaServerRegistryStore()
 type ListOption = 'showAddress' | 'showMediaStatistics' | 'showConnectionStatus' | 'showWatchTime'
 const serverStatistics = ref<Record<string, MediaServerHomeStatistics>>({})
@@ -370,8 +371,9 @@ const emit = defineEmits<{ (event: 'open-server', id: string): void; (event: 'cl
 const MEDIA_SERVER_ICON_SET_URLS_KEY = 'MediaServer_IconSetUrls'
 const showServerModal = ref(!!props.embedded)
 const showPlexResourcesModal = ref(false)
-const editingServer = ref<MediaServerConfig | null>(null)
-const pendingType = ref<MediaServerType>(props.defaultType || 'jellyfin')
+// Embedded editor opened from 已存储的共享 starts on that server instead of an empty add form.
+const editingServer = ref<MediaServerConfig | null>((props.editServerId && registry.servers.find((item) => item.id === props.editServerId)) || null)
+const pendingType = ref<MediaServerType>(editingServer.value?.type || props.defaultType || 'jellyfin')
 const pendingPlexName = ref('')
 const submitting = ref(false)
 watch([showServerModal, showPlexResourcesModal, submitting], ([form, resources, busy]) => {
@@ -754,15 +756,18 @@ const runBackgroundServerLogin = async (serverId: string, payload: {
   nameCustomized?: boolean
 }) => {
   if (payload.type === 'plex' || !payload.username?.trim() || !payload.password?.trim()) return
+  const original = registry.servers.find((item) => item.id === serverId)
+  const unchanged = () => registry.servers.find((item) => item.id === serverId) === original
   try {
     const authResult = await signInMediaServer(payload)
     const current = registry.servers.find((item) => item.id === serverId)
-    if (!current) return
+    if (!current || !unchanged()) return
     const profile = await fetchMediaServerLoginProfile({
       type: payload.type,
       baseUrl: authResult.normalizedBaseUrl,
       accessToken: authResult.accessToken
     })
+    if (!unchanged()) return
     registry.updateServer(serverId, {
       baseUrl: authResult.normalizedBaseUrl,
       accessToken: authResult.accessToken,
@@ -777,6 +782,7 @@ const runBackgroundServerLogin = async (serverId: string, payload: {
     })
   } catch (error) {
     console.error('媒体服务器静默登录失败:', error)
+    if (!unchanged() || !isMediaServerAuthenticationRejected(error)) return
     registry.updateServer(serverId, {
       loginStatus: 'failed',
       lastLoginCheckedAt: Date.now()

@@ -650,6 +650,7 @@ import { useLibraryBrowseMode } from '../store/libraryBrowseMode'
 import PosterRatingBadge from './PosterRatingBadge.vue'
 import { isMediaWatched, localWatchedKeys, setMediaWatched } from '../utils/localWatchedState'
 import MediaPanRight from './MediaPanRight.vue'
+import { listLocalDirectory } from '../utils/videoFile'
 import { useMediaPanFileStore, useMediaPanTreeStore } from './stores'
 import CategoryCard from './CategoryCard.vue'
 import MediaDetail from './MediaDetail.vue'
@@ -953,7 +954,6 @@ const loadMediaPage = async (reset = false) => {
   const requestId = ++pageRequestId
   const { category, type, predicate } = getMediaPageQuery()
   const localItems = ['continue', 'continue-watching'].includes(category) ? continueWatchingItems.value
-    : ['recent', 'recently-added'].includes(category) ? mediaStore.recentlyAdded
       : category === 'favorites' ? mediaStore.favorites.map(favoriteIdToMediaItem).filter((item): item is MediaLibraryItem => !!item)
         : category === 'playlist' ? (selectedPlaylist.value ? (mediaStore.playlists[selectedPlaylist.value] || []).map(favoriteIdToMediaItem).filter((item): item is MediaLibraryItem => !!item) : [])
           : undefined
@@ -990,6 +990,7 @@ const loadNextPage = () => void loadMediaPage(false)
 watch(() => [props.browseSort, props.browseSortDescending], () => void loadMediaPage(true))
 watch(() => props.browseSelection, () => { localSelection.value = false; selectedBrowseIds.value = [] })
 watch(() => props.localOnly, () => void loadMediaPage(true))
+watch(() => mediaStore.catalogRevision, () => void loadMediaPage(true))
 
 watch(
   () => [props.activeCategory, props.selectedFolder?.id, props.selectedGenre, props.selectedYear, props.selectedRating, selectedGenre.value, selectedYear.value, selectedRating.value, activeTab.value, selectedPlaylist.value, selectedCast.value, selectedCountry.value, localSearchQuery.value, mediaStore.watchedItems.join('\n'), mediaStore.favorites.join('\n'), mediaStore.recentlyAdded.length, mediaStore.isScanning],
@@ -1539,7 +1540,7 @@ const handleBrowserFileAction = async (action: string, file: IAliGetFileModel) =
   }
   if (['play', 'loop', 'shuffle'].includes(action)) {
     if (file.isDir) { const folder = mediaStore.folders.find(folder => folder.fileId === file.file_id); if (folder) await playBrowse(action as 'play' | 'loop' | 'shuffle', folder.id); else message.warning(t('mediaLibrary.noPlayableVideo')); }
-    else await menuOpenFile(file, '', { playlistLoop: action === 'loop' })
+    else await menuOpenFile(file, '', { libraryPlayback: true, playlistLoop: action === 'loop' })
     return
   }
   if (action === 'series') { openCustomSeries({ id: target?.id || JSON.stringify([mediaPanTreeStore.user_id, file.drive_id, file.file_id]), title: target?.name || file.name }); return }
@@ -2009,7 +2010,21 @@ async function resumeMedia(item: MediaLibraryItem) {
     : item.driveFiles || []
   const file = files.find(file => file.id === item.lastPlayedFileId) || files[0]
   if (!file) { message.warning(t('mediaLibrary.noPlayableVideo')); return }
-  await menuOpenFile(buildAliFileModel(file), '')
+  const resumeFile = buildAliFileModel(file)
+  const savedSeconds = Number(item.lastPlayedPositionSeconds) || 0
+  if (savedSeconds > 0) resumeFile.media_play_cursor = String(savedSeconds)
+  const playlistFiles = item.type === 'tv'
+    ? (item.seasons || []).flatMap(season => season.episodes || []).flatMap(episode => {
+      const version = episode.driveFiles?.find(entry => entry.id === file.id)
+        || playbackVersions(episode.driveFiles || [])[0]
+      return version ? [version] : []
+    })
+    : [file]
+  const playlist = playlistFiles.map(entry => buildPlaylistEntry(buildAliFileModel(entry), entry.name || item.name))
+  await menuOpenFile(resumeFile, '', { libraryPlayback: true,
+    customPlaylistLabel: item.name,
+    customPlaylist: playlist
+  })
 }
 
 function shuffleInPlace<T>(items: T[]): void {
@@ -2046,7 +2061,7 @@ const playPlaylist = async (playlistName: string, loop = false, shuffle = false)
   }
 
   if (shuffle) shuffleInPlace(playable)
-  await menuOpenFile(playable[0].aliFile, '', {
+  await menuOpenFile(playable[0].aliFile, '', { libraryPlayback: true,
     playlistLoop: loop,
     customPlaylistLabel: playlistName,
     customPlaylist: playable.map((item) => item.entry)
@@ -2064,7 +2079,7 @@ const playFromMenu = async (loop = false, shuffle = false) => {
       .filter((item): item is NonNullable<ReturnType<typeof resolvePlayablePlaylistItem>> => !!item)
     if (shuffle) shuffleInPlace(playable)
     if (!playable.length) message.warning(t('mediaLibrary.noPlayablePlaylist'))
-    else await menuOpenFile(playable[0].aliFile, '', {
+    else await menuOpenFile(playable[0].aliFile, '', { libraryPlayback: true,
       playlistLoop: loop,
       customPlaylistLabel: selectedPlaylist.value,
       customPlaylist: playable.map(item => item.entry)
@@ -2087,7 +2102,7 @@ const playFromMenu = async (loop = false, shuffle = false) => {
   if (shuffle) shuffleInPlace(episodes)
   const firstEntry = episodes[0]
   const firstFile = firstEntry ? { ...playable.aliFile, user_id: firstEntry.user_id, drive_id: firstEntry.drive_id, file_id: firstEntry.file_id, parent_file_id: firstEntry.parent_file_id, name: firstEntry.file_name, description: firstEntry.description } as IAliGetFileModel : playable.aliFile
-  await menuOpenFile(firstFile, '', { playlistLoop: loop, ...(episodes.length ? { customPlaylistLabel: contextMenuItem.value.name, customPlaylist: episodes } : {}) })
+  await menuOpenFile(firstFile, '', { libraryPlayback: true, playlistLoop: loop, ...(episodes.length ? { customPlaylistLabel: contextMenuItem.value.name, customPlaylist: episodes } : {}) })
   handleContextMenuClose()
 }
 
@@ -2108,7 +2123,7 @@ async function playItems(items: MediaLibraryItem[], mode: 'play' | 'loop' | 'shu
     for (let i = playable.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [playable[i], playable[j]] = [playable[j], playable[i]] }
   }
   if (!playable.length) { message.warning(t('mediaLibrary.noPlayableVideo')); return }
-  await menuOpenFile(playable[0].aliFile, '', { customPlaylistLabel: title, customPlaylist: playable.map(item => item.entry), playlistLoop: mode === 'loop' })
+  await menuOpenFile(playable[0].aliFile, '', { libraryPlayback: true, customPlaylistLabel: title, customPlaylist: playable.map(item => item.entry), playlistLoop: mode === 'loop' })
 }
 
 // 显示文件夹文件列表
@@ -2185,8 +2200,12 @@ const handleEnterFolder = async (file: any) => {
 
     let items: any[] = []
 
+    // Local sources list the subfolder's own children from disk, like the source root.
+    if (driveId === 'local') {
+      items = await listLocalDirectory(fileId)
+    }
     // 检查是否为 WebDAV 驱动器
-    if (isWebDavDrive(driveId)) {
+    else if (isWebDavDrive(driveId)) {
       console.log('使用WebDAV API获取子文件夹文件列表')
       const connectionId = getWebDavConnectionId(driveId)
       const connection = getWebDavConnection(connectionId)
@@ -2251,9 +2270,9 @@ const handleEnterFolder = async (file: any) => {
       const list = await apiCloud139FileList(userId, fileId, 200)
       items = list.map(item => ({ ...mapCloud139FileToAliModel(item, driveId, fileId), user_id: userId }))
     } else if (driveId === 'cloud189') {
-      const { apiCloud189FileList, mapCloud189FileToAliModel } = await import('../cloud189/dirfilelist')
-      const list = await apiCloud189FileList(userId, fileId, 200)
-      items = list.map(item => ({ ...mapCloud189FileToAliModel(item, driveId, fileId), user_id: userId }))
+      const { listAllCloud189Items } = await import('../cloud189/adapter')
+      const list = await listAllCloud189Items(userId, driveId, fileId)
+      items = list.map(item => ({ ...item, user_id: userId }))
     } else if (driveId === 'guangya') {
       const { apiGuangyaFileList, mapGuangyaFileToAliModel } = await import('../guangya/dirfilelist')
       const list = await apiGuangyaFileList(userId, fileId, 200)

@@ -1,6 +1,8 @@
 import Electron, { ipcRenderer, webUtils } from 'electron'
 
 window.Electron = Electron
+window.WebStartupLock = (action, current, next) =>
+  ipcRenderer.invoke('StartupLock:request', action, current, next)
 process.noAsar = true
 window.platform = process.platform
 window.WebIsE2E = process.env.BOXPLAYER_E2E === '1'
@@ -286,6 +288,10 @@ window.WebMusicAudioLoad = (data: any) => ipcRenderer.invoke('MusicAudio:load', 
 window.WebMusicAudioControl = (data: any) => ipcRenderer.invoke('MusicAudio:control', data)
 window.WebMusicAudioStatus = () => ipcRenderer.invoke('MusicAudio:status')
 
+window.WebSeekThumbnail = (data: { url: string; headers?: Record<string, string>; time: number }) => ipcRenderer.invoke('Playback:thumbnail', data)
+window.WebCancelSeekThumbnail = () => ipcRenderer.send('Playback:cancelThumbnail')
+window.WebLocalVideoPreview = (data: { path: string }) => ipcRenderer.invoke('LocalVideo:preview', data)
+
 let currentMpvSessionId = ''
 window.WebMpvEmbeddedLoad = async function(data: any) {
   currentMpvSessionId = String(data?.sessionId || crypto.randomUUID())
@@ -521,3 +527,6 @@ ipcRenderer.on('webview-redirect', (e, webContentsId, url) => {
 
 window.AutoUpdateDownload = () => ipcRenderer.invoke('AutoUpdate:Download')
 window.AutoUpdateAcknowledge = () => ipcRenderer.invoke('AutoUpdate:Acknowledge')
+
+window.WebReadMusicHead = (input) => ipcRenderer.invoke('MusicHead:read', input)
+window.WebReadMusicLocal = (input) => ipcRenderer.invoke('MusicLocal:read', input)
